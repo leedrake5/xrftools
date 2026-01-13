@@ -92,44 +92,29 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
     ) %>%
     dplyr::ungroup()
 
-  # Vectorized Gaussian matrix computation - single allocation instead of pmap + reduce
-  # This is the main performance optimization: computes all Gaussian responses in one matrix operation
-  n_energy <- length(energy_kev)
-  n_peaks <- nrow(peaks)
-  elements <- unique(peaks$element)
-  n_elements <- length(elements)
-
-  # Build Gaussian matrix for all peaks at once using outer product approach
-  # Each column is a peak's Gaussian response
-  gaussian_matrix <- gaussian_matrix_vectorized(
-    energy_kev,
-    peaks$energy_kev,
-    peaks$sigma,
-    peaks$relative_peak_height
-  )
-
-  # Sum Gaussian responses by element to get element response matrix
-  element_idx <- match(peaks$element, elements)
-  X <- matrix(0, nrow = n_energy, ncol = n_elements)
-  colnames(X) <- elements
-
-  for (i in seq_len(n_peaks)) {
-    X[, element_idx[i]] <- X[, element_idx[i]] + gaussian_matrix[, i]
-  }
-
-  # Extract primary peak info per element
-  primary_info <- peaks %>%
+  # calculate gaussian responses for each row in peaks
+  # summarise combined response per element
+  responses <- peaks %>%
+    dplyr::select("element", "energy_kev", "sigma", "relative_peak_height", "relative_peak_intensity") %>%
+    dplyr::mutate(
+      response_element = purrr::pmap(
+        list(.data$energy_kev, .data$sigma, .data$relative_peak_height),
+        function(mu, sigma, height) gaussian_fun(!!energy_kev, mu = mu, sigma = sigma, height = height)
+      )
+    ) %>%
+    # sum all the responses per element
     dplyr::group_by(.data$element) %>%
     dplyr::summarise(
       primary_energy_kev = .data$energy_kev[which.max(.data$relative_peak_intensity)],
       primary_sigma = .data$sigma[which.max(.data$relative_peak_intensity)],
-      .groups = "drop"
-    )
-
-  # Reorder to match element order in X
-  primary_info <- primary_info[match(elements, primary_info$element), ]
+      response_element = list(purrr::reduce(.data$response_element, `+`))
+    ) %>%
+    dplyr::ungroup()
 
   # least squares estimation of coefficients (peak height of peak with relative height of 1)
+  X <- do.call(cbind, responses$response_element)
+  colnames(X) <- responses$element
+
   df <- tibble::as_tibble(cbind(.response = response, X))
   . <- NULL; rm(.); .response <- NULL; rm(.response) # CMD hack for formula
   fit <- stats::lm(.response ~ 0 + ., data = df)
@@ -141,13 +126,9 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
 
   # create coefficient info to return
   fit_sum <- summary(fit)
-  responses <- tibble::tibble(
-    element = elements,
-    primary_energy_kev = primary_info$primary_energy_kev,
-    primary_sigma = primary_info$primary_sigma,
-    height = stats::coefficients(fit)[elements],
-    height_se = fit_sum$coefficients[, 2, drop = TRUE][elements]
-  )
+  responses$response_element <- NULL
+  responses$height <- stats::coefficients(fit)[responses$element]
+  responses$height_se <- fit_sum$coefficients[, 2, drop = TRUE][responses$element]
   responses$peak_area <- responses$height * responses$primary_sigma * sqrt(2 * pi)
   responses$peak_area_se <- responses$height_se * responses$primary_sigma * sqrt(2 * pi)
 
@@ -230,27 +211,4 @@ xrf_add_deconvolution_fun <- function(.spectra, .fun, ..., .env = parent.frame()
 
 gaussian_fun <- function(energy_kev, mu = 0, sigma = 1, height = 1) {
   height * exp(-0.5 * ((energy_kev - mu) / sigma) ^ 2)
-}
-
-# Vectorized Gaussian matrix computation
-# Returns a matrix where each column is a Gaussian response for one peak
-# This avoids the pmap + reduce pattern which allocates many intermediate vectors
-gaussian_matrix_vectorized <- function(energy_kev, mu, sigma, height) {
-  n_energy <- length(energy_kev)
-  n_peaks <- length(mu)
-
-  # Outer subtraction: E[i] - mu[j] for all i,j pairs
-  # Result is n_energy x n_peaks matrix
-  diff_matrix <- outer(energy_kev, mu, `-`)
-
-  # Broadcast sigma across rows: each column divided by its sigma
-  sigma_matrix <- matrix(sigma, nrow = n_energy, ncol = n_peaks, byrow = TRUE)
-  scaled_diff <- diff_matrix / sigma_matrix
-
-  # Gaussian exponential
-  gauss_matrix <- exp(-0.5 * scaled_diff^2)
-
-  # Scale by heights (broadcast across rows)
-  height_matrix <- matrix(height, nrow = n_energy, ncol = n_peaks, byrow = TRUE)
-  gauss_matrix * height_matrix
 }

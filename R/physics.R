@@ -97,9 +97,9 @@ xrf_transition_probability <- function(element, trans, method = "EADL97") {
   # Initialize cache on first use
   .init_physics_cache()
 
-  # Fast hash-based lookup (O(1) per lookup)
+  # Vectorized named vector lookup
   keys <- paste(element, trans, sep = ":")
-  .hash_lookup(.xrf_cache$emission_prob_hash, keys)
+  unname(.xrf_cache$emission_prob_vec[keys])
 }
 
 #' @rdname xrf_absorption_jump
@@ -115,9 +115,9 @@ xrf_fluorescence_yield <- function(element, shell, method = "EADL97") {
   # Initialize cache on first use
   .init_physics_cache()
 
-  # Fast hash-based lookup (O(1) per lookup)
+  # Vectorized named vector lookup
   keys <- paste(element, shell, sep = ":")
-  .hash_lookup(.xrf_cache$fluorescence_yield_hash, keys)
+  unname(.xrf_cache$fluorescence_yield_vec[keys])
 }
 
 #' @rdname xrf_absorption_jump
@@ -132,9 +132,9 @@ xrf_coster_kronig_probability <- function(element, shell, coster_kronig_trans, m
   # Initialize cache on first use
   .init_physics_cache()
 
-  # Fast hash-based lookup (O(1) per lookup)
+  # Vectorized named vector lookup
   keys <- paste(element, shell, coster_kronig_trans, sep = ":")
-  .hash_lookup(.xrf_cache$coster_kronig_hash, keys)
+  unname(.xrf_cache$coster_kronig_vec[keys])
 }
 
 #' @rdname xrf_absorption_jump
