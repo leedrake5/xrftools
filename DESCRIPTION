@@ -19,7 +19,8 @@ Imports:
   Peaks,
   Rcpp,
   ggplot2,
-  ggrepel
+  ggrepel,
+  data.table
 License: GPL-3
 Encoding: UTF-8
 LazyData: true

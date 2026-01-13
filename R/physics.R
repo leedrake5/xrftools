@@ -94,9 +94,12 @@ xrf_transition_probability <- function(element, trans, method = "EADL97") {
   }
   stopifnot(is.character(trans))
 
-  tibble::tibble(element = element, trans = trans) %>%
-    dplyr::left_join(xrftools::x_ray_emission_probabilities, by = c("element", "trans")) %>%
-    dplyr::pull("emission_probability")
+  # Initialize cache on first use
+  .init_physics_cache()
+
+  # Fast hash-based lookup (O(1) per lookup)
+  keys <- paste(element, trans, sep = ":")
+  .hash_lookup(.xrf_cache$emission_prob_hash, keys)
 }
 
 #' @rdname xrf_absorption_jump
@@ -109,9 +112,12 @@ xrf_fluorescence_yield <- function(element, shell, method = "EADL97") {
   }
   stopifnot(is.character(shell))
 
-  tibble::tibble(element = element, shell = shell) %>%
-    dplyr::left_join(xrftools::x_ray_fluorescence_yields, by = c("element", "shell")) %>%
-    dplyr::pull("fluorescence_yield")
+  # Initialize cache on first use
+  .init_physics_cache()
+
+  # Fast hash-based lookup (O(1) per lookup)
+  keys <- paste(element, shell, sep = ":")
+  .hash_lookup(.xrf_cache$fluorescence_yield_hash, keys)
 }
 
 #' @rdname xrf_absorption_jump
@@ -123,9 +129,12 @@ xrf_coster_kronig_probability <- function(element, shell, coster_kronig_trans, m
   }
   stopifnot(is.character(shell))
 
-  tibble::tibble(element = element, shell = shell, coster_kronig_trans = coster_kronig_trans) %>%
-    dplyr::left_join(xrftools::x_ray_coster_kronig_probabilities, by = c("element", "shell", "coster_kronig_trans")) %>%
-    dplyr::pull("coster_kronig_prob")
+  # Initialize cache on first use
+  .init_physics_cache()
+
+  # Fast hash-based lookup (O(1) per lookup)
+  keys <- paste(element, shell, coster_kronig_trans, sep = ":")
+  .hash_lookup(.xrf_cache$coster_kronig_hash, keys)
 }
 
 #' @rdname xrf_absorption_jump
