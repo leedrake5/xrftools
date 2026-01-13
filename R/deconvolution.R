@@ -111,82 +111,42 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
     ) %>%
     dplyr::ungroup()
 
-  # least squares estimation using QR decomposition (faster than lm())
+  # least squares estimation of coefficients (peak height of peak with relative height of 1)
   X <- do.call(cbind, responses$response_element)
   colnames(X) <- responses$element
-  elements <- responses$element
-  n <- length(response)
-  p <- ncol(X)
+  df <- tibble::as_tibble(cbind(.response = response, X))
+  . <- NULL; rm(.); .response <- NULL; rm(.response) # CMD hack for formula
+  fit <- stats::lm(.response ~ 0 + ., data = df)
 
-  # QR decomposition for solving and SE calculation
-  qr_X <- qr(X)
-  coef <- qr.coef(qr_X, response)
-  coef[is.na(coef)] <- 0  # Handle singular columns like lm() does
-  names(coef) <- elements
+  # add info to df to return
+  df$.response_fit <- stats::predict(fit)
+  df$.energy_kev <- energy_kev
+  df <- dplyr::select(df, dplyr::starts_with("."), dplyr::everything())
 
-  # Calculate fitted values and residuals
-  response_fit <- qr.fitted(qr_X, response)
-  residuals <- response - response_fit
-
-  # Calculate standard errors
-  rank <- qr_X$rank
-  sigma2 <- sum(residuals^2) / max(n - rank, 1)
-
-  # Standard errors from (X'X)^-1 diagonal using chol2inv on R
-  coef_se <- rep(NA_real_, p)
-  names(coef_se) <- elements
-  if (rank > 0 && rank == p) {
-    # Full rank case - fast path
-    R <- qr.R(qr_X)
-    XtX_inv_diag <- rowSums(backsolve(R, diag(p))^2)
-    coef_se <- sqrt(XtX_inv_diag * sigma2)
-    names(coef_se) <- elements
-  } else if (rank > 0) {
-    # Rank deficient - use chol2inv on the non-singular part
-    R <- qr.R(qr_X)[1:rank, 1:rank, drop = FALSE]
-    R_inv <- backsolve(R, diag(rank))
-    pivot <- qr_X$pivot[1:rank]
-    coef_se[pivot] <- sqrt(rowSums(R_inv^2) * sigma2)
-  }
-
-  # Calculate R-squared
-  ss_res <- sum(residuals^2)
-  ss_tot <- sum((response - mean(response))^2)
-  r2 <- 1 - ss_res / ss_tot
-  r2_adj <- 1 - (1 - r2) * (n - 1) / (n - p)
-
-  # Build response data frame
-  df <- tibble::tibble(
-    energy_kev = energy_kev,
-    response = response,
-    response_fit = response_fit
-  )
-
-  # Build peaks output
+  # create coefficient info to return
+  fit_sum <- summary(fit)
   responses$response_element <- NULL
-  responses$height <- coef[elements]
-  responses$height_se <- coef_se[elements]
+  responses$height <- stats::coefficients(fit)[responses$element]
+  responses$height_se <- fit_sum$coefficients[, 2, drop = TRUE][responses$element]
   responses$peak_area <- responses$height * responses$primary_sigma * sqrt(2 * pi)
   responses$peak_area_se <- responses$height_se * responses$primary_sigma * sqrt(2 * pi)
 
-  # Build components efficiently using base R
-  n_energy <- length(energy_kev)
-  n_elements <- length(elements)
-  components <- tibble::tibble(
-    energy_kev = rep(energy_kev, n_elements),
-    element = rep(elements, each = n_energy),
-    response_fit = as.vector(X) * rep(coef, each = n_energy),
-    height = rep(coef, each = n_energy)
-  )
+  components <- tibble::as_tibble(X) %>%
+    dplyr::mutate(energy_kev = energy_kev) %>%
+    tidyr::gather("element", "response_fit", -"energy_kev") %>%
+    dplyr::left_join(responses %>% dplyr::select("element", "height"), by = "element") %>%
+    dplyr::mutate(response_fit = .data$response_fit * .data$height)
 
   structure(
     list(
       fit = tibble::tibble(
-        r2 = r2,
-        r2_adj = r2_adj,
-        chi_sq = sum(residuals^2 / response)
+        r2 = fit_sum$r.squared,
+        r2_adj = fit_sum$adj.r.squared,
+        chi_sq = sum(fit_sum$residuals^2 / df$.response)
       ),
-      response = df,
+      response = df %>%
+        dplyr::select(dplyr::starts_with(".")) %>%
+        dplyr::rename_all(stringr::str_remove, "^\\."),
       components = components,
       peaks = responses
     ),
