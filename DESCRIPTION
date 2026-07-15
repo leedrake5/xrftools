@@ -1,9 +1,10 @@
 Package: xrftools
 Title: XRF Tools for R
-Version: 0.0.2
+Version: 0.0.3
 Authors@R: c(person("Drake", "Lee", email="b.lee.drake@gmail.com", role=c("aut", "cre")), person("Dewey", "Dunnington", email = "dewey@fishandwhistle.net", role = c("aut")))
 Description: Work with XRF spectra for quantitative or qualitative analysis.
-Depends: R (>= 3.4.0)
+Depends: 
+    R (>= 3.5)
 Imports:
   rlang,
   dplyr,
@@ -20,7 +21,8 @@ Imports:
   Rcpp,
   ggplot2,
   ggrepel,
-  data.table
+  data.table,
+  nnls
 License: GPL-3
 Encoding: UTF-8
 LazyData: true
@@ -28,7 +30,7 @@ Suggests:
     testthat,
     baseline,
     covr
-RoxygenNote: 7.1.1
+RoxygenNote: 7.3.2
 Remotes: cran/Peaks
 URL: https://github.com/leedrake5/xrftools
 BugReports: https://github.com/leedrake5/xrftools/issues

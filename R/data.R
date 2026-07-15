@@ -45,6 +45,36 @@
 #'
 "x_ray_cross_sections"
 
+#' Photon mass attenuation coefficients
+#'
+#' Per-element mass attenuation coefficients \eqn{\mu/\rho} (cm^2/g) from the EPDL97 library, on the
+#' native energy grid (~5 eV to 200 keV): \code{photoelectric}, \code{rayleigh} (coherent),
+#' \code{compton} (incoherent) and \code{total}. Used by \link{xrf_mass_attenuation},
+#' \link{xrf_detector_efficiency} and \link{xrf_escape_peaks}.
+#'
+#' @source
+#' EPDL97 (\url{http://www-nds.iaea.org/epdl97/libsall.htm}), via the specfile conversion vendored
+#' in \code{data-raw/EPDL97_CrossSections.dat}.
+#'
+"x_ray_mass_attenuation"
+
+#' Bote-Salvat electron-impact ionization coefficients
+#'
+#' Fitting coefficients for the Bote & Salvat (2008) inner-shell electron-impact ionization cross
+#' sections, per element (Z = 1-99) and subshell (1 = K, 2 = L1, ... 9 = M5): the tabulated edge
+#' energy (\code{edge_ev}) and the coefficients \code{be}, \code{anlj}, \code{g1}-\code{g4} and
+#' \code{a1}-\code{a5}. Consumed by \link{xrf_electron_ionization_cross_section} with
+#' \code{method = "bote-salvat"}.
+#'
+#' @source
+#' NIST BoteSalvatICX.jl (\url{https://github.com/usnistgov/BoteSalvatICX.jl}), public domain.
+#'
+#' @references
+#' Bote, D. & Salvat, F. (2008). Calculations of inner-shell ionization by electron impact with the
+#' distorted-wave and plane-wave Born approximations. Phys. Rev. A 77, 042701.
+#'
+"x_ray_bote_salvat"
+
 #' @rdname x_ray_cross_sections
 "x_ray_fluorescence_yields"
 

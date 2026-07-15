@@ -13,6 +13,31 @@ xrf_add_deconvolution_gls(
   energy_max_kev = Inf,
   peaks = xrf_energies(),
   default_sigma = 0.07,
+  detector_type = NULL,
+  fano = NULL,
+  epsilon_ev = NULL,
+  noise_fwhm_ev = NULL,
+  efficiency = FALSE,
+  escape = FALSE,
+  be_window_um = NULL,
+  dead_layer_um = NULL,
+  nonneg = TRUE,
+  weighting = c("auto", "poisson", "none"),
+  .counts = NULL,
+  .livetime = NULL,
+  tube = NULL,
+  geometry = NULL,
+  scatter = NULL,
+  compton_broadening = 2,
+  tail = 0,
+  step = 0,
+  beta = NULL,
+  cache_templates = TRUE,
+  refine_calibration = FALSE,
+  sum_peaks = FALSE,
+  count_rate = NULL,
+  pileup_tau = NULL,
+  use_qr = TRUE,
   .env = parent.frame()
 )
 
@@ -22,7 +47,32 @@ xrf_deconvolute_gaussian_least_squares(
   peaks = xrf_energies(),
   default_sigma = 0.07,
   energy_min_kev = -Inf,
-  energy_max_kev = Inf
+  energy_max_kev = Inf,
+  detector_type = NULL,
+  fano = NULL,
+  epsilon_ev = NULL,
+  noise_fwhm_ev = NULL,
+  efficiency = FALSE,
+  escape = FALSE,
+  be_window_um = NULL,
+  dead_layer_um = NULL,
+  nonneg = TRUE,
+  weighting = c("auto", "poisson", "none"),
+  counts = NULL,
+  livetime = NULL,
+  tube = NULL,
+  geometry = NULL,
+  scatter = NULL,
+  compton_broadening = 2,
+  tail = 0,
+  step = 0,
+  beta = NULL,
+  cache_templates = TRUE,
+  refine_calibration = FALSE,
+  sum_peaks = FALSE,
+  count_rate = NULL,
+  pileup_tau = NULL,
+  use_qr = TRUE
 )
 }
 \arguments{
@@ -32,14 +82,82 @@ xrf_deconvolute_gaussian_least_squares(
 
 \item{energy_min_kev, energy_max_kev}{Constrain the energies that should be deconvoluted}
 
-\item{peaks}{A data frame of columns with columns "element", "}
+\item{peaks}{A data frame with (at least) columns "element" and "energy_kev". Optional columns
+"sigma" and "relative_peak_intensity" are used when present.}
 
-\item{default_sigma}{The default standard deviation of the peaks (can also be passed in as
-a columm in \code{peaks} if this value varies between peaks)}
+\item{default_sigma}{The default standard deviation of the peaks (keV), used when neither a
+\code{sigma} column nor a detector model is supplied.}
+
+\item{detector_type, fano, epsilon_ev, noise_fwhm_ev}{Detector resolution parameters. When any of
+these is supplied (and \code{peaks} has no \code{sigma} column) the per-line peak width is
+computed from the energy-dependent resolution model \link{xrf_detector_sigma_kev} instead of a
+constant \code{default_sigma}. \code{detector_type} is one of \link{xrf_detector_presets}
+(e.g. "SDD", "HPGe", "CdTe"); the scalars override the preset.}
+
+\item{efficiency}{If TRUE, reweight each line by the energy-dependent detector efficiency
+(\link{xrf_detector_efficiency}); corrects line shape and high-energy sensitivity. Uses the
+\code{detector_type} geometry (override window/dead layer with \code{be_window_um} /
+\code{dead_layer_um}).}
+
+\item{escape}{If TRUE, add detector escape-peak satellites (\link{xrf_escape_peaks}), tied to each
+parent line's amplitude. Important for Ge/CdTe at high energy.}
+
+\item{be_window_um, dead_layer_um}{Detector window / dead-layer thickness (microns) for the
+efficiency model; \code{NULL} uses the \code{detector_type} preset.}
+
+\item{nonneg}{If TRUE (default) coefficients are constrained to be non-negative via
+\link[nnls]{nnls} (peak areas / concentrations cannot be negative). Set FALSE for the classic
+unconstrained least-squares behaviour.}
+
+\item{weighting}{Counting-statistics weighting. "poisson" performs an iteratively-reweighted fit
+with weights 1/variance derived from the modelled counts (requires \code{counts}/\code{.counts}
+and \code{livetime}/\code{.livetime}); "none" is ordinary (unweighted) least squares; "auto"
+(default) uses "poisson" when counts and live time are available and "none" otherwise.}
+
+\item{tube, geometry}{Optional \link{xrf_tube} / \link{xrf_geometry} objects. When a \code{tube}
+is supplied, Rayleigh and Compton tube-scatter templates are added to the fit automatically
+(see \code{scatter} and \link{xrf_scatter_peaks}); \code{geometry} sets the Compton scatter
+angle. (Not otherwise consumed yet -- reserved for fundamental-parameters work.)}
+
+\item{scatter}{Whether to include Rayleigh/Compton scatter templates. \code{NULL} (default)
+enables them when a \code{tube} is supplied; \code{TRUE}/\code{FALSE} force on/off.}
+
+\item{compton_broadening}{Multiplier on the detector width for the Doppler-broadened Compton
+peak (passed to \link{xrf_scatter_peaks}).}
+
+\item{tail, step, beta}{Hypermet line-shape parameters (passed to \link{xrf_lineshape}): relative
+low-energy tail amplitude, shelf/step amplitude, and tail decay length. Defaults (0, 0, NULL)
+give a pure Gaussian. The reported \code{peak_area} includes the tail area when \code{tail > 0}.}
+
+\item{cache_templates}{If TRUE (default) reuse the design matrix across successive calls that
+share the same energy grid, peaks and line-shape (e.g. a batch from one instrument), skipping
+the Gaussian re-evaluation.}
+
+\item{refine_calibration}{If TRUE, refine a 2-parameter energy calibration (zero + gain) of the
+template centroids by variable projection before the final fit -- robust to small gain/zero
+drift that would otherwise bias amplitudes. Disables template caching for that call.}
+
+\item{sum_peaks}{If TRUE, add coincidence (pile-up) sum-peak templates at E_i + E_j for the
+strongest lines, so pile-up is not misassigned to real elements.}
+
+\item{count_rate}{Optional total count rate (cps); when supplied and 0, the sum-peak step is
+skipped. Reserved for scaling the pile-up contribution.}
+
+\item{pileup_tau}{Optional detector pulse-pair resolution time (seconds). When supplied with
+\code{counts}/\code{.counts} and \code{livetime}/\code{.livetime}, a physically-constrained
+two-pass pile-up correction is applied (coincidence peak areas fixed to \eqn{2\tau/T\,A_iA_j});
+this supersedes the free-amplitude \code{sum_peaks} model.}
+
+\item{use_qr}{If TRUE (default) unconstrained fits (\code{nonneg = FALSE}) use fast QR
+decomposition; set FALSE for fork-safe \code{lm()} under multicore parallelism. Ignored when
+\code{nonneg = TRUE}.}
 
 \item{.env}{Calling environment}
 
 \item{energy_kev, .energy_kev}{Energy values corresponding to response/.values}
+
+\item{counts, .counts, livetime, .livetime}{Raw gross counts per channel and the acquisition live
+time (seconds), used for Poisson weighting and for the count-space goodness-of-fit. Optional.}
 }
 \value{
 A modified version of .spectra

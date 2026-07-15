@@ -24,7 +24,15 @@ xrf_coster_kronig_probability(
   method = "EADL97"
 )
 
-xrf_relative_peak_intensity(element, shell, trans, beam_energy_kev = 50)
+xrf_relative_peak_intensity(
+  element,
+  shell,
+  trans,
+  beam_energy_kev = 50,
+  excitation_weighting = c("cross_section", "jump"),
+  coster_kronig = TRUE,
+  excitation = c("photon", "electron")
+)
 }
 \arguments{
 \item{element}{An element symbol or atomic number}
@@ -40,6 +48,23 @@ and EADL97 tables are used for other parameters.}
 
 \item{beam_energy_kev}{The beam energy used to excite the electrons. Currently unused, but
 should be incorporated into the calculation.}
+
+\item{excitation_weighting}{How to weight the primary vacancy production per subshell.
+"cross_section" (default) uses the energy-dependent partial photoionization cross section
+\eqn{\sigma_{shell}(E_0)} from \link{xrf_photoionization_cross_section} at
+\code{beam_energy_kev}, so the K:L branching correctly depends on the beam energy; it falls
+back to the (energy-independent) absorption-jump ratio only where the cross section is
+unavailable. "jump" uses the absorption-jump ratio everywhere (the classic, beam-independent
+behaviour).}
+
+\item{coster_kronig}{If TRUE (default) redistribute L1/L2 vacancies down the L subshells via
+Coster-Kronig transfer (\link{x_ray_coster_kronig_probabilities}) before radiative decay,
+correcting the relative intensities of the L family for heavier elements.}
+
+\item{excitation}{"photon" (default, tube/synchrotron XRF) weights subshell production by the
+photoionization cross section (or jump ratio); "electron" (SEM-EDS) uses the electron-impact
+ionization cross section \link{xrf_electron_ionization_cross_section} instead, so the M series
+of heavy elements is correctly enhanced at low beam energy.}
 }
 \value{
 A vector of numerics

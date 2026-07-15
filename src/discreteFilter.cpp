@@ -52,18 +52,21 @@ NumericVector discreteFilterIterative(NumericVector x, NumericVector f, int iter
   int n = x.length();
   NumericVector out = x;
   NumericVector outNext(out.length());
-  double meanResidual;
+  double rmsChange;
 
   for(int i=0; i<iterations; i++) {
     checkUserInterrupt();
 
     outNext = discreteFilter(out, f, true, true);
-    meanResidual = sum(outNext - out) / n;
-    if((epsilon > 0) && (meanResidual < epsilon)) {
-      out = outNext;
+    // Convergence metric: RMS of the per-channel change. The previous signed mean
+    // (sum(outNext - out) / n) is ~0 for an area-preserving smoother regardless of how much the
+    // shape still changes, so any positive epsilon tripped on the first iteration. RMS is >= 0 and
+    // only small once the iteration has actually converged.
+    NumericVector d = outNext - out;
+    rmsChange = sqrt(sum(d * d) / n);
+    out = outNext;
+    if((epsilon > 0) && (rmsChange < epsilon)) {
       break;
-    } else {
-      out = outNext;
     }
   }
 

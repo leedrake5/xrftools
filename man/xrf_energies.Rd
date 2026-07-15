@@ -8,17 +8,38 @@ xrf_energies(
   elements = "everything",
   beam_energy_kev = 50,
   ...,
+  excitation = c("photon", "electron"),
+  overvoltage_min = 1,
+  excitation_weighting = c("cross_section", "jump"),
+  coster_kronig = TRUE,
   min_relative_intensity = 0.01
 )
 }
 \arguments{
 \item{elements}{Elements or element lists (passed to \link{xrf_element_list}).}
 
-\item{beam_energy_kev}{Beam energy, used to filter the list and calculate relative peak intensities.}
+\item{beam_energy_kev}{Beam energy (keV). For \code{excitation = "photon"} this is the tube
+endpoint used to select which lines can be excited (a line is kept when its absorption edge is
+at or below \code{beam_energy_kev}). For \code{excitation = "electron"} it is the accelerating
+voltage used with \code{overvoltage_min}.}
 
 \item{...}{Used to further \link[dplyr]{filter} the result.}
 
-\item{min_relative_intensity}{Smallest peak to include, relatie to the maximum peak for a given
+\item{excitation}{Excitation mode. "photon" (default, tube/synchrotron XRF) keeps lines whose
+edge is below the beam energy and weights production by the photoionization cross section.
+"electron" (SEM-EDS) keeps lines whose overvoltage \eqn{U = beam / edge} is at least
+\code{overvoltage_min} and weights production by the electron-impact ionization cross section
+(\link{xrf_electron_ionization_cross_section}), so the M series of heavy elements is correctly
+enhanced at low beam energy.}
+
+\item{overvoltage_min}{Minimum overvoltage \eqn{U = beam / edge} for a line to be kept in
+\code{excitation = "electron"} mode. Useful excitation typically needs \eqn{U \gtrsim 1.2-1.5}.}
+
+\item{excitation_weighting, coster_kronig}{Passed to \link{xrf_relative_peak_intensity}: how to
+weight subshell vacancy production ("cross_section", the energy-dependent default, or "jump"),
+and whether to apply the Coster-Kronig L-subshell cascade.}
+
+\item{min_relative_intensity}{Smallest peak to include, relative to the maximum peak for a given
 element.}
 }
 \value{
@@ -29,5 +50,6 @@ Get XRF energies for selected elements
 }
 \examples{
 xrf_energies("major", 25)
+xrf_energies("major", 20, excitation = "electron", overvoltage_min = 1.5)
 
 }

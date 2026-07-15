@@ -49,6 +49,21 @@ specs %>%
   facet_wrap(vars(ConditionSet), scales = "free_y")
 ```
 
+## Reading other formats
+
+`read_xrf_panalytical()` reads Panalytical `.mp2` files, but any spectrum that arrives as counts-per-channel plus an energy calibration (the usual SEM-EDS / generic-MCA case) can be ingested with `xrf_spectra_from_counts()`. It builds the `energy_kev` axis from a linear (or quadratic) calibration via `xrf_calibrate_energy()` and keeps the raw `counts` and live time so that Poisson-weighted deconvolution can use them.
+
+```{r, eval=FALSE}
+# counts-per-channel + a keV calibration (gain is keV/channel)
+spec <- xrf_spectra_from_counts(
+  counts, gain = 0.02, zero = 0, livetime = 60,
+  SampleIdent = "std-1"
+)
+
+# or just the channel -> energy conversion (mind keV vs eV per channel)
+energy_kev <- xrf_calibrate_energy(0:2047, gain = 0.02, zero = 0)
+```
+
 ## Baselines
 
 The **xrf** package can use several existing methods for estimating "background" or "baseline" values. The most useful of these for XRF spectra is the Sensitive Nonlinear Iterative Peak (SNIP) method, implemented in the **Peaks** package.
@@ -82,6 +97,34 @@ specs %>%
 ```
 
 ## Deconvolution
+
+`xrf_add_deconvolution_gls()` fits a non-negative linear combination of per-element Gaussian templates to the (baseline-subtracted) spectrum. Since the original unconstrained fit it has gained:
+
+- **Non-negativity** (`nonneg = TRUE`, the default): coefficients are solved with NNLS (the **nnls** package) so peak areas and concentrations can no longer come back negative. Set `nonneg = FALSE` for the classic unconstrained least squares.
+- **Counting-statistics weighting** (`weighting`): `"poisson"` runs an iteratively-reweighted fit with `1/variance` weights derived from the modelled counts (needs raw `.counts` and `.livetime`); `"auto"` (default) uses Poisson weighting when counts and live time are available and unweighted least squares otherwise.
+- **Diagnostics**: the `.deconvolution_fit` table now reports a `condition_number` (κ of the design matrix — large values flag collinear/ill-conditioned line overlaps) and a proper count-space Pearson `chi_sq` (finite on real spectra, unlike the old NaN/Inf value).
+- **Calibration refinement** (`refine_calibration = TRUE`): refines a two-parameter (zero + gain) energy calibration of the template centroids by variable projection before the final fit, so small gain/zero drift does not bias amplitudes.
+- **Template caching** (`cache_templates = TRUE`, default): reuses the design matrix across successive spectra that share an energy grid / peaks / line-shape (e.g. a batch from one instrument).
+- **Corrected peak intensities**: relative line intensities no longer double-count the fluorescence yield (the tabulated emission probabilities already include ω), so cross-shell (K:L:M) ratios are now physical.
+
+The new physics below is opt-in through flat scalar arguments plus `xrf_tube()` / `xrf_geometry()`:
+
+```{r, eval=FALSE}
+deconvoluted <- specs %>%
+  filter(ConditionSet %in% c("Omnian", "Omnian2")) %>%
+  xrf_add_baseline_snip(iterations = 20) %>%
+  xrf_add_deconvolution_gls(
+    .spectra$energy_kev, .spectra$cps,
+    peaks = xrf_energies("major", beam_energy_kev = kV),
+    .counts = .spectra$counts, .livetime = LiveTime, # enables Poisson weighting
+    detector_type = "SDD",             # energy-dependent resolution sigma(E)
+    efficiency = TRUE, escape = TRUE,  # detector efficiency + escape peaks
+    tube = xrf_tube("Rh", kv = 40),    # adds Rayleigh/Compton scatter templates
+    weighting = "poisson", nonneg = TRUE
+  )
+```
+
+The worked example below keeps the original arguments for comparability:
 
 ```{r}
 deconvoluted <- specs %>%
@@ -130,6 +173,77 @@ ggplot() +
   facet_wrap(~ConditionSet + SampleIdent, scales = "free") +
   scale_y_sqrt() +
   theme_bw(10)
+```
+
+## Detector response
+
+The detector is now modelled explicitly rather than as a single fixed-width Gaussian.
+
+- **Energy-dependent resolution.** Peak width follows the Fano/noise model `FWHM(E) = sqrt(N^2 + (2.3548)^2 * F * ε * E)`. Select a material with `detector_type` (or override `fano` / `epsilon_ev` / `noise_fwhm_ev`); `xrf_detector_presets()` ships SDD, SiLi, SiPIN, HPGe and CdTe defaults. `xrf_detector_sigma_kev()` / `xrf_detector_fwhm_ev()` expose the model directly.
+- **Efficiency** (`efficiency = TRUE`): reweights each line by `xrf_detector_efficiency()` — window transmission × dead-layer transmission × active-volume absorption — which cuts light elements at a Be window and heavy-element K-lines in a thin Si crystal. Override geometry with `be_window_um` / `dead_layer_um`.
+- **Escape peaks** (`escape = TRUE`): adds `xrf_escape_peaks()` satellites tied to each parent line's amplitude (small for Si, up to ~10–15% just above the Ge K edge, large for CdTe).
+- **Line shape** (`tail` / `step` / `beta`): a Hypermet low-energy tail and flat shelf from incomplete charge collection via `xrf_lineshape()`; the defaults `(0, 0, NULL)` give a pure Gaussian, and the reported `peak_area` includes the tail area when `tail > 0`.
+- **Sum / pile-up peaks**: `sum_peaks = TRUE` adds coincidence templates at `E_i + E_j`; supplying a detector pulse-pair time `pileup_tau` (with counts + live time) instead applies a physically-constrained two-pass correction with coincidence areas fixed to `2τ/T * A_i A_j`.
+
+```{r, eval=FALSE}
+xrf_detector_presets()
+
+# resolution grows and efficiency falls with energy
+xrf_detector_sigma_kev(c(0.28, 5.9, 59.3, 98.4), "SDD")
+xrf_detector_efficiency(c(0.5, 6, 30, 60, 100), "SDD")
+```
+
+## Excitation & line data
+
+- **Cross-section excitation weighting** (`excitation_weighting = "cross_section"`, default): subshell vacancy production is weighted by the energy-dependent partial photoionization cross section σ_shell(E0) from the rebuilt EPDL `x_ray_cross_sections` table (all subshells K–M5, native grid ~5 eV to 200 keV), so the K:L:M branching correctly tracks the beam energy. `"jump"` restores the classic beam-independent absorption-jump behaviour.
+- **Coster-Kronig L-cascade** (`coster_kronig = TRUE`, default): redistributes L1/L2 vacancies down the L subshells before radiative decay, fixing the L-family shape of Pb/Au/W/U.
+- **More lines.** `xrf_energies()` now includes heavy-element **M-lines** (Z 50–92) and light-element **K-lines** (C/N/O/F), so heavy elements below their L edge and the ubiquitous O K-line are representable.
+- **Electron-impact excitation (SEM-EDS).** Pass `excitation = "electron"` to `xrf_energies()` (with an `overvoltage_min` cut) to weight production by the electron-impact ionization cross section instead of the photoionization one. The default method is **Bote-Salvat (2008)** (absolute cross sections vendored in `x_ray_bote_salvat`); Gryzinski and Bethe are also selectable via `xrf_electron_ionization_cross_section()`.
+- **Tube scatter.** Supplying a `tube = xrf_tube(...)` adds Rayleigh (coherent) and Compton (incoherent, energy-shifted and Doppler-broadened) scatter templates via `xrf_scatter_peaks()`. The tube's own emission spectrum (Ebel continuum + anode lines) is available as `xrf_tube_spectrum()` and can drive polychromatic excitation in the quantification layer.
+
+```{r, eval=FALSE}
+# heavy-element M-lines and light-element K-lines are now present
+xrf_energies("everything", beam_energy_kev = 30)
+
+# SEM-EDS: electron excitation with an overvoltage cut
+xrf_energies("major", beam_energy_kev = 20,
+             excitation = "electron", overvoltage_min = 1.5)
+
+# Rayleigh + Compton scatter templates for a Rh tube, and the tube spectrum
+xrf_scatter_peaks(xrf_tube("Rh", kv = 40), xrf_geometry(scatter_angle_deg = 135),
+                  detector_type = "SDD")
+xrf_tube_spectrum(xrf_tube("Rh", kv = 40), seq(1, 40, 0.05))
+```
+
+## Quantification
+
+Two complementary paths turn fitted peak areas into composition.
+
+**(1) `xrf_quantify()` — fundamental parameters, closed to 100%.** Converts areas to mass fractions using `xrf_fp_sensitivity()` with a first-order matrix correction: iterative self-absorption (`self_absorption = TRUE`), optional secondary and tertiary enhancement fluorescence (`secondary_fluorescence` / `tertiary_fluorescence`, Shiraiwa-Fujino), optional polychromatic excitation when a `tube` is supplied, and optional oxide stoichiometry (`oxide`, default `FALSE` — XRF cannot measure oxygen, so oxygen-by-difference is a modelling choice). Concentrations are renormalized to sum to `total`. The self-absorption closed form is exact only for monochromatic excitation and assumes a thick, homogeneous sample.
+
+**(2) `xrf_observed_mass()` — un-normalized, matrix-decoupled.** For oxides / minerals where closing to 100% is unsafe (a wrong oxide guess or a missing light element smears across a normalized assay), this reports each element independently and never forces a closed sum. It returns `observed_mass = A_i / S_i`, the observed **areal mass** = concentration × that element's information depth — **not** a matrix-free value and **not** comparable across elements or across samples of differing matrix. To make values comparable, use `self_absorption = "generalized"` (divides out the per-element depth with a documented generic `matrix`) and/or `normalization = "compton"`, and even then only as well as the generic matrix approximates the real one. It is a **primary-fluorescence** quantity — secondary enhancement is not modelled, so elements just below a strong exciter (e.g. Cr/V/Ti/Ca under Fe Kα) read high — and it assumes a thick, homogeneous sample.
+
+Plus `xrf_compton_normalize()` (divide areas by the fitted Compton area — the standard matrix-robust normalizer for portable XRF) and `xrf_calibrate()` (fit empirical per-element response factors by regressing certified reference values against observed mass; pass the result back as `calibration =`).
+
+```{r, eval=FALSE}
+fit <- xrf_deconvolute_gaussian_least_squares(
+  spec$energy_kev, spec$cps,
+  peaks = xrf_energies("major", beam_energy_kev = 40),
+  detector_type = "SDD", tube = xrf_tube("Rh", kv = 40)
+)
+
+# (1) fundamental-parameters concentrations, renormalized to 100%
+xrf_quantify(fit, beam_energy_kev = 40, detector_type = "SDD",
+             self_absorption = TRUE, secondary_fluorescence = TRUE,
+             tube = xrf_tube("Rh", kv = 40))
+
+# (2) un-normalized, matrix-decoupled per-element areal mass
+xrf_observed_mass(fit, beam_energy_kev = 40, detector_type = "SDD",
+                  self_absorption = "generalized", matrix = "silicate")
+
+# matrix-robust Compton normalization, and an empirical calibration
+xrf_compton_normalize(fit)
+k <- xrf_calibrate(standards, values, beam_energy_kev = 40, detector_type = "SDD")
 ```
 
 ```{r, eval=FALSE}

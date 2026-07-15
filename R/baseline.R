@@ -9,20 +9,57 @@
 #'
 #' @export
 #'
-xrf_add_baseline_snip <- function(.spectra, .values = .data$.spectra$cps, ..., .clamp = -Inf, .env = parent.frame()) {
+xrf_add_baseline_snip <- function(.spectra, .values = .data$.spectra$cps, ...,
+                                  energy_aware = FALSE, .energy_kev = .data$.spectra$energy_kev,
+                                  .clamp = -Inf, .env = parent.frame()) {
   # have to load the Peaks DLLs for some reason
   .First.lib <- NULL; rm(.First.lib)
   withr::with_namespace("Peaks", .First.lib(dirname(find.package("Peaks")), "Peaks"))
 
   .values <- enquo(.values)
-  xrf_add_baseline(
-    .spectra,
-    Peaks::SpectrumBackground,
-    !!.values,
-    ...,
-    .clamp = .clamp,
-    .env = .env
-  )
+
+  if (!energy_aware) {
+    return(xrf_add_baseline(
+      .spectra,
+      Peaks::SpectrumBackground,
+      !!.values,
+      ...,
+      .clamp = .clamp,
+      .env = .env
+    ))
+  }
+
+  # Energy-aware SNIP: the clipping window is constant in CHANNELS, but the peak FWHM grows with
+  # energy (FWHM^2 = noise^2 + F*eps*E), so a window right at one energy is wrong elsewhere. We
+  # resample onto a sqrt(E) abscissa -- where the peak width is approximately constant per channel --
+  # run SNIP there with a fixed window, and map the background back. This keeps the window from
+  # climbing into the wings of the broad high-energy K-lines / Compton hump.
+  .energy_kev <- enquo(.energy_kev)
+  dots <- quos(...)
+  .spectra$.spectra <- purrr::map(purrr::transpose(.spectra), function(spectrum) {
+    x <- spectrum$.spectra
+    vals <- rlang::eval_tidy(.values, data = spectrum, env = .env)
+    energy <- rlang::eval_tidy(.energy_kev, data = spectrum, env = .env)
+    args <- purrr::map(dots, rlang::eval_tidy, data = spectrum, env = .env)
+    bg <- do.call(snip_energy_aware, c(list(values = vals, energy_kev = energy), args))
+    x$baseline <- pmax(bg, .clamp)
+    x
+  })
+
+  .spectra
+}
+
+# SNIP on a sqrt(E)-warped, uniformly-resampled axis, mapped back to the original energy grid.
+snip_energy_aware <- function(values, energy_kev, ...) {
+  stopifnot(length(values) == length(energy_kev))
+  finite <- is.finite(energy_kev) & is.finite(values)
+  if (sum(finite) < 3) return(rep(NA_real_, length(values)))
+  u <- sqrt(pmax(energy_kev, 0))
+  u_uniform <- seq(min(u[finite]), max(u[finite]), length.out = length(u))
+  # ties at u = 0 (from clamped non-positive energies) are collapsed by approx() -- harmless here
+  v_u <- suppressWarnings(stats::approx(u, values, xout = u_uniform, rule = 2))$y
+  bg_u <- Peaks::SpectrumBackground(v_u, ...)
+  suppressWarnings(stats::approx(u_uniform, bg_u, xout = u, rule = 2))$y
 }
 
 #' Caclulate baselines using the baseline package

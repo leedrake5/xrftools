@@ -8,6 +8,8 @@ xrf_add_baseline_snip(
   .spectra,
   .values = .data$.spectra$cps,
   ...,
+  energy_aware = FALSE,
+  .energy_kev = .data$.spectra$energy_kev,
   .clamp = -Inf,
   .env = parent.frame()
 )
