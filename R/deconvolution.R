@@ -22,6 +22,10 @@
 #'   parent line's amplitude. Important for Ge/CdTe at high energy.
 #' @param be_window_um,dead_layer_um Detector window / dead-layer thickness (microns) for the
 #'   efficiency model; \code{NULL} uses the \code{detector_type} preset.
+#' @param active_thickness_um Active-volume thickness (microns) for the efficiency model; \code{NULL}
+#'   uses the \code{detector_type} preset (SDD = 450 um, a typical modern silicon-drift detector).
+#'   Governs high-energy transmission (thin Si becomes transparent to heavy-element K lines), so it
+#'   only matters when \code{efficiency = TRUE}.
 #' @param nonneg If TRUE (default) coefficients are constrained to be non-negative via
 #'   \link[nnls]{nnls} (peak areas / concentrations cannot be negative). Set FALSE for the classic
 #'   unconstrained least-squares behaviour.
@@ -71,6 +75,7 @@ xrf_add_deconvolution_gls <- function(.spectra, .energy_kev = .data$.spectra$ene
                                       noise_fwhm_ev = NULL,
                                       efficiency = FALSE, escape = FALSE,
                                       be_window_um = NULL, dead_layer_um = NULL,
+                                      active_thickness_um = NULL,
                                       nonneg = TRUE, weighting = c("auto", "poisson", "none"),
                                       .counts = NULL, .livetime = NULL,
                                       tube = NULL, geometry = NULL,
@@ -93,6 +98,7 @@ xrf_add_deconvolution_gls <- function(.spectra, .energy_kev = .data$.spectra$ene
   escape <- enquo(escape)
   be_window_um <- enquo(be_window_um)
   dead_layer_um <- enquo(dead_layer_um)
+  active_thickness_um <- enquo(active_thickness_um)
   nonneg <- enquo(nonneg)
   weighting <- enquo(weighting)
   .counts <- enquo(.counts)
@@ -128,6 +134,7 @@ xrf_add_deconvolution_gls <- function(.spectra, .energy_kev = .data$.spectra$ene
     escape = !!escape,
     be_window_um = !!be_window_um,
     dead_layer_um = !!dead_layer_um,
+    active_thickness_um = !!active_thickness_um,
     nonneg = !!nonneg,
     weighting = !!weighting,
     counts = !!.counts,
@@ -158,6 +165,7 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
                                                    epsilon_ev = NULL, noise_fwhm_ev = NULL,
                                                    efficiency = FALSE, escape = FALSE,
                                                    be_window_um = NULL, dead_layer_um = NULL,
+                                                   active_thickness_um = NULL,
                                                    nonneg = TRUE,
                                                    weighting = c("auto", "poisson", "none"),
                                                    counts = NULL, livetime = NULL,
@@ -214,6 +222,7 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
   if (isTRUE(efficiency)) {
     peaks$relative_peak_intensity <- peaks$relative_peak_intensity *
       xrf_detector_efficiency(peaks$energy_kev, detector_type = detector_type,
+                              active_thickness_um = active_thickness_um,
                               be_window_um = be_window_um, dead_layer_um = dead_layer_um)
   }
 

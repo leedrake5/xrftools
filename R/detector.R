@@ -72,10 +72,10 @@ xrf_detector_fwhm_ev <- function(energy_kev, detector_type = NULL, fano = NULL,
 xrf_detector_presets <- function() {
   tibble::tribble(
     ~type,   ~material, ~fano,  ~epsilon_ev, ~noise_fwhm_ev, ~active_thickness_um, ~be_window_um, ~dead_layer_um,
-    "SDD",   "Si",      0.115,  3.64,        50,             0.5e3,                8.0,           0.10,
+    "SDD",   "Si",      0.115,  3.64,        50,             0.45e3,               8.0,           0.10,
     "SiLi",  "Si",      0.115,  3.64,        80,             3.0e3,                12.0,          0.10,
     "SiPIN", "Si",      0.115,  3.64,        90,             0.5e3,                12.5,          0.10,
-    "Si",    "Si",      0.115,  3.64,        50,             0.5e3,                8.0,           0.10,
+    "Si",    "Si",      0.115,  3.64,        50,             0.45e3,               8.0,           0.10,
     "HPGe",  "Ge",      0.110,  2.96,        90,             5.0e3,                25.0,          0.30,
     "Ge",    "Ge",      0.110,  2.96,        90,             5.0e3,                25.0,          0.30,
     "CdTe",  "CdTe",    0.150,  4.43,        90,             1.0e3,                4.0,           0.10
