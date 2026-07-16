@@ -132,7 +132,7 @@ xrf_compton_normalize <- function(object, by = c("compton", "rayleigh", "scatter
 #'
 #' @param elements Element symbols.
 #' @param beam_energy_kev Excitation energy (keV).
-#' @param detector_type,be_window_um,dead_layer_um Detector parameters for the efficiency term
+#' @param detector_type,be_window_um,dead_layer_um,active_thickness_um Detector parameters for the efficiency term
 #'   (see \link{xrf_detector_efficiency}); \code{efficiency = FALSE} omits it.
 #' @param efficiency Include the detector-efficiency term?
 #' @param excitation,excitation_weighting,coster_kronig Passed to \link{xrf_relative_peak_intensity}.
@@ -144,7 +144,8 @@ xrf_compton_normalize <- function(object, by = c("compton", "rayleigh", "scatter
 #' @export
 #'
 xrf_fp_sensitivity <- function(elements, beam_energy_kev, detector_type = NULL,
-                               be_window_um = NULL, dead_layer_um = NULL, efficiency = TRUE,
+                               be_window_um = NULL, dead_layer_um = NULL, active_thickness_um = NULL,
+                               efficiency = TRUE,
                                excitation = c("photon", "electron"),
                                excitation_weighting = c("cross_section", "jump"),
                                coster_kronig = TRUE, tube = NULL) {
@@ -180,6 +181,7 @@ xrf_fp_sensitivity <- function(elements, beam_energy_kev, detector_type = NULL,
     }
     eff <- if (efficiency) {
       xrf_detector_efficiency(lines$energy_kev, detector_type = detector_type,
+                              active_thickness_um = active_thickness_um,
                               be_window_um = be_window_um, dead_layer_um = dead_layer_um)
     } else {
       rep(1, nrow(lines))
@@ -211,7 +213,7 @@ xrf_fp_sensitivity <- function(elements, beam_energy_kev, detector_type = NULL,
 #' @param object A \code{deconvolution_fit} or its \code{peaks} data frame (needs \code{element},
 #'   \code{peak_area}).
 #' @param beam_energy_kev Excitation energy (keV).
-#' @param detector_type,be_window_um,dead_layer_um,efficiency,excitation,excitation_weighting,coster_kronig,tube
+#' @param detector_type,be_window_um,dead_layer_um,active_thickness_um,efficiency,excitation,excitation_weighting,coster_kronig,tube
 #'   Passed to \link{xrf_fp_sensitivity}. Supplying \code{tube = }\link{xrf_tube} integrates the
 #'   primary excitation over the polychromatic tube spectrum instead of a single energy.
 #' @param self_absorption Apply the iterative self-absorption correction?
@@ -235,7 +237,8 @@ xrf_fp_sensitivity <- function(elements, beam_energy_kev, detector_type = NULL,
 #' @export
 #'
 xrf_quantify <- function(object, beam_energy_kev, detector_type = NULL,
-                         be_window_um = NULL, dead_layer_um = NULL, efficiency = TRUE,
+                         be_window_um = NULL, dead_layer_um = NULL, active_thickness_um = NULL,
+                         efficiency = TRUE,
                          excitation = c("photon", "electron"),
                          excitation_weighting = c("cross_section", "jump"), coster_kronig = TRUE,
                          tube = NULL, self_absorption = TRUE, secondary_fluorescence = FALSE,
@@ -253,6 +256,7 @@ xrf_quantify <- function(object, beam_energy_kev, detector_type = NULL,
 
   s <- xrf_fp_sensitivity(q$element, beam_energy_kev, detector_type = detector_type,
                           be_window_um = be_window_um, dead_layer_um = dead_layer_um,
+                          active_thickness_um = active_thickness_um,
                           efficiency = efficiency, excitation = match.arg(excitation),
                           excitation_weighting = match.arg(excitation_weighting),
                           coster_kronig = coster_kronig, tube = tube)
@@ -382,7 +386,7 @@ xrf_quantify <- function(object, beam_energy_kev, detector_type = NULL,
 #'
 #' @param object A \code{deconvolution_fit} or its \code{peaks} data frame (needs \code{element},
 #'   \code{peak_area}; scatter pseudo-elements are used for \code{normalization} and then dropped).
-#' @param beam_energy_kev,detector_type,be_window_um,dead_layer_um,efficiency,excitation,excitation_weighting,coster_kronig,tube
+#' @param beam_energy_kev,detector_type,be_window_um,dead_layer_um,active_thickness_um,efficiency,excitation,excitation_weighting,coster_kronig,tube
 #'   Passed to \link{xrf_fp_sensitivity} to compute \eqn{S_i}.
 #' @param self_absorption "none" (default) returns \eqn{A_i/S_i} (the observed areal mass, where the
 #'   real matrix has cancelled into the per-element sampling depth). "generalized" divides out that
@@ -407,7 +411,7 @@ xrf_quantify <- function(object, beam_energy_kev, detector_type = NULL,
 #' @export
 #'
 xrf_observed_mass <- function(object, beam_energy_kev, detector_type = NULL, be_window_um = NULL,
-                              dead_layer_um = NULL, efficiency = TRUE,
+                              dead_layer_um = NULL, active_thickness_um = NULL, efficiency = TRUE,
                               excitation = c("photon", "electron"),
                               excitation_weighting = c("cross_section", "jump"),
                               coster_kronig = TRUE, tube = NULL,
@@ -427,6 +431,7 @@ xrf_observed_mass <- function(object, beam_energy_kev, detector_type = NULL, be_
 
   s <- xrf_fp_sensitivity(q$element, beam_energy_kev, detector_type = detector_type,
                           be_window_um = be_window_um, dead_layer_um = dead_layer_um,
+                          active_thickness_um = active_thickness_um,
                           efficiency = efficiency, excitation = match.arg(excitation),
                           excitation_weighting = match.arg(excitation_weighting),
                           coster_kronig = coster_kronig, tube = tube)
@@ -497,7 +502,7 @@ xrf_observed_mass <- function(object, beam_energy_kev, detector_type = NULL, be_
 #' @param values The known reference values, either a list of named numeric vectors (element ->
 #'   value), one per standard, or a data frame with an \code{element} column plus one column per
 #'   standard, or one row per standard with element columns.
-#' @param beam_energy_kev,detector_type,be_window_um,dead_layer_um,efficiency,excitation,excitation_weighting,coster_kronig,tube,self_absorption,matrix,incidence_deg,takeoff_deg,normalization
+#' @param beam_energy_kev,detector_type,be_window_um,dead_layer_um,active_thickness_um,efficiency,excitation,excitation_weighting,coster_kronig,tube,self_absorption,matrix,incidence_deg,takeoff_deg,normalization
 #'   Passed to \link{xrf_observed_mass} to compute the observed values for each standard (use the
 #'   settings you will apply to unknowns).
 #'
@@ -507,7 +512,8 @@ xrf_observed_mass <- function(object, beam_energy_kev, detector_type = NULL, be_
 #' @export
 #'
 xrf_calibrate <- function(standards, values, beam_energy_kev, detector_type = NULL,
-                          be_window_um = NULL, dead_layer_um = NULL, efficiency = TRUE,
+                          be_window_um = NULL, dead_layer_um = NULL, active_thickness_um = NULL,
+                          efficiency = TRUE,
                           excitation = c("photon", "electron"),
                           excitation_weighting = c("cross_section", "jump"), coster_kronig = TRUE,
                           tube = NULL, self_absorption = c("none", "generalized"),
@@ -532,7 +538,8 @@ xrf_calibrate <- function(standards, values, beam_energy_kev, detector_type = NU
 
   obs_list <- lapply(standards, function(st)
     xrf_observed_mass(st, beam_energy_kev, detector_type = detector_type, be_window_um = be_window_um,
-                      dead_layer_um = dead_layer_um, efficiency = efficiency, excitation = excitation,
+                      dead_layer_um = dead_layer_um, active_thickness_um = active_thickness_um,
+                      efficiency = efficiency, excitation = excitation,
                       excitation_weighting = excitation_weighting, coster_kronig = coster_kronig,
                       tube = tube, self_absorption = self_absorption, matrix = matrix,
                       incidence_deg = incidence_deg, takeoff_deg = takeoff_deg,
