@@ -52,9 +52,19 @@ xrf_filter_pyramid <- function(width = 7) {
 #' @export
 xrf_filter_gaussian <- function(width = 7, alpha = 2.5) {
   stopifnot(
-    is.numeric(width), length(width) == 1, width >= 3, (width %% 2) != 0,
+    is.numeric(width), length(width) == 1, is.finite(width),
     is.numeric(alpha), length(alpha) == 1, alpha > 0
   )
+  # The kernel must have an odd, integer number of taps (a symmetric window around a centre point). The
+  # old guard `(width %% 2) != 0` was fooled by non-integers -- e.g. width = 20.327 passes (0.327 != 0) but
+  # then builds an even-length (invalid) kernel that fails downstream. Coerce to the nearest valid odd
+  # integer (>= 3) and warn, so a caller optimizing width over a continuous range cannot silently break it.
+  width_odd <- max(3, 2 * round((width - 1) / 2) + 1)
+  if (!isTRUE(width == width_odd)) {
+    warning("xrf_filter_gaussian(): 'width' must be an odd integer >= 3; coercing ",
+            width, " to ", width_odd, ".", call. = FALSE)
+    width <- width_odd
+  }
   hw <- width %/% 2 # halfwidth
   e <- exp(1) # eulers number
   a <- alpha
