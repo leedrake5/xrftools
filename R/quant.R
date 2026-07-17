@@ -145,6 +145,7 @@ xrf_compton_normalize <- function(object, by = c("compton", "rayleigh", "scatter
 #'
 xrf_fp_sensitivity <- function(elements, beam_energy_kev, detector_type = NULL,
                                be_window_um = NULL, dead_layer_um = NULL, active_thickness_um = NULL,
+                               air_path_cm = NULL, atmosphere = "Air", window = NULL,
                                efficiency = TRUE,
                                excitation = c("photon", "electron"),
                                excitation_weighting = c("cross_section", "jump"),
@@ -182,7 +183,8 @@ xrf_fp_sensitivity <- function(elements, beam_energy_kev, detector_type = NULL,
     eff <- if (efficiency) {
       xrf_detector_efficiency(lines$energy_kev, detector_type = detector_type,
                               active_thickness_um = active_thickness_um,
-                              be_window_um = be_window_um, dead_layer_um = dead_layer_um)
+                              be_window_um = be_window_um, dead_layer_um = dead_layer_um,
+                              air_path_cm = air_path_cm, atmosphere = atmosphere, window = window)
     } else {
       rep(1, nrow(lines))
     }
@@ -233,11 +235,13 @@ xrf_fp_sensitivity <- function(elements, beam_energy_kev, detector_type = NULL,
 #' @param iterations Self-absorption iterations.
 #'
 #' @return A tibble with \code{element}, \code{primary_energy_kev}, \code{peak_area},
-#'   \code{sensitivity}, and \code{concentration}.
+#'   \code{sensitivity}, \code{concentration} (normalized, closed to \code{total}), and
+#'   \code{observed_mass} (un-normalized, matrix-corrected \eqn{A_i/(S_i\,\cdot\,\mathrm{selfabs}\,\cdot\,(1+\mathrm{enh}))}).
 #' @export
 #'
 xrf_quantify <- function(object, beam_energy_kev, detector_type = NULL,
                          be_window_um = NULL, dead_layer_um = NULL, active_thickness_um = NULL,
+                         air_path_cm = NULL, atmosphere = "Air", window = NULL,
                          efficiency = TRUE,
                          excitation = c("photon", "electron"),
                          excitation_weighting = c("cross_section", "jump"), coster_kronig = TRUE,
@@ -257,6 +261,7 @@ xrf_quantify <- function(object, beam_energy_kev, detector_type = NULL,
   s <- xrf_fp_sensitivity(q$element, beam_energy_kev, detector_type = detector_type,
                           be_window_um = be_window_um, dead_layer_um = dead_layer_um,
                           active_thickness_um = active_thickness_um,
+                          air_path_cm = air_path_cm, atmosphere = atmosphere, window = window,
                           efficiency = efficiency, excitation = match.arg(excitation),
                           excitation_weighting = match.arg(excitation_weighting),
                           coster_kronig = coster_kronig, tube = tube)
@@ -285,18 +290,32 @@ xrf_quantify <- function(object, beam_energy_kev, detector_type = NULL,
   # normalize the cations (+ derived oxygen) to sum to `total`
   renorm <- function(cc) cc * (total / (sum(cc) + sum(cc * r)))
 
-  conc <- renorm(q$peak_area / q$sensitivity)
+  raw <- q$peak_area / q$sensitivity          # un-normalized observed mass; the FP loop refines it in place
+  conc <- renorm(raw)
 
   if (isTRUE(self_absorption) || isTRUE(secondary_fluorescence)) {
     sin_in <- sin(incidence_deg * pi / 180)
     sin_out <- sin(takeoff_deg * pi / 180)
     Ei <- q$primary_energy_kev
     dm_el <- names(dark_matrix); dm_frac <- as.numeric(dark_matrix)
-    mu_at <- function(energy) {   # sample mass attenuation at one energy over the current mix
-      m <- sum(conc * vapply(els, function(el) .xrf_element_pe_mu(el, energy), numeric(1)))
-      o_c <- sum(conc * r)                                  # derived oxygen
-      if (o_c > 0) m <- m + o_c * .xrf_element_pe_mu("O", energy)
-      if (length(dm_el)) m <- m + sum(dm_frac * vapply(dm_el, function(el) .xrf_element_pe_mu(el, energy), numeric(1)))
+    # Sample self-absorption uses TOTAL mass attenuation (every interaction -- photoelectric AND scatter --
+    # removes a photon from the beam/emission path). This is distinct from the photoelectric mu used below
+    # for fluorescence PRODUCTION (tau_E0 / tau_ij), where only photoelectric absorption creates a vacancy.
+    # Precompute per-element TOTAL mu at every energy the matrix is evaluated at (the beam energy + each
+    # element's line energy). These are composition-INDEPENDENT, so doing the (expensive) mass-attenuation
+    # lookups once here -- rather than on every iteration -- makes mu_at() a fast weighted sum.
+    mu_energies <- c(beam_energy_kev, Ei)                    # index 1 = beam, index i+1 = line i
+    mu_tab <- vapply(mu_energies, function(en) vapply(els, function(el) .xrf_element_total_mu(el, en), numeric(1)),
+                     numeric(length(els)))
+    if (!is.matrix(mu_tab)) mu_tab <- matrix(mu_tab, nrow = length(els))            # length(els)==1 guard
+    muO_tab  <- if (any(r > 0)) vapply(mu_energies, function(en) .xrf_element_total_mu("O", en), numeric(1)) else NULL
+    muDM_tab <- if (length(dm_el)) vapply(mu_energies, function(en) vapply(dm_el, function(el) .xrf_element_total_mu(el, en), numeric(1)),
+                                          numeric(length(dm_el))) else NULL
+    if (!is.null(muDM_tab) && !is.matrix(muDM_tab)) muDM_tab <- matrix(muDM_tab, nrow = length(dm_el))
+    mu_at <- function(k) {   # k indexes mu_energies; matrix attenuation over the current mix
+      m <- sum(conc * mu_tab[, k])
+      o_c <- sum(conc * r); if (o_c > 0 && !is.null(muO_tab)) m <- m + o_c * muO_tab[k]      # derived oxygen
+      if (!is.null(muDM_tab)) m <- m + sum(dm_frac * muDM_tab[, k])
       m
     }
     # precompute the (concentration-independent) atomic factors for secondary fluorescence
@@ -310,8 +329,8 @@ xrf_quantify <- function(object, beam_energy_kev, detector_type = NULL,
     }
 
     for (iter in seq_len(iterations)) {
-      mu_e0 <- mu_at(beam_energy_kev)
-      mu_ei <- vapply(Ei, mu_at, numeric(1))
+      mu_e0 <- mu_at(1L)
+      mu_ei <- vapply(seq_along(Ei), function(i) mu_at(i + 1L), numeric(1))
       m_corr <- if (isTRUE(self_absorption)) 1 / (mu_e0 / sin_in + mu_ei / sin_out) else 1
 
       # Secondary/tertiary (enhancement) fluorescence, Shiraiwa-Fujino. B[i, j] is the enhancement of
@@ -334,16 +353,23 @@ xrf_quantify <- function(object, beam_energy_kev, detector_type = NULL,
         enh <- if (isTRUE(tertiary_fluorescence)) as.vector(B %*% (conc * (1 + enh2))) else enh2
       }
 
-      conc <- renorm(q$peak_area / (q$sensitivity * m_corr * (1 + enh)))
+      raw <- q$peak_area / (q$sensitivity * m_corr * (1 + enh))   # matrix-corrected, still un-normalized
+      conc <- renorm(raw)
     }
   }
 
   q$concentration <- conc
-  out <- tibble::as_tibble(q[, c("element", "primary_energy_kev", "peak_area", "sensitivity", "concentration")])
+  # Un-normalized, matrix-corrected observed mass: A_i / (S_i * self_absorption * (1 + enhancement)). Unlike
+  # `concentration` it is NOT closed to a fixed sum, so a single element's value is not forced up or down by
+  # the others' total -- it moves only through the real matrix corrections (self-absorption + secondary/
+  # tertiary fluorescence). This is what the CloudCal "full-fidelity" $Mass reports.
+  q$observed_mass <- raw
+  out <- tibble::as_tibble(q[, c("element", "primary_energy_kev", "peak_area", "sensitivity",
+                                 "concentration", "observed_mass")])
   if (oxide_on && any(r > 0)) {   # report the stoichiometric oxygen
     out <- dplyr::bind_rows(out, tibble::tibble(
       element = "O", primary_energy_kev = NA_real_, peak_area = NA_real_,
-      sensitivity = NA_real_, concentration = sum(conc * r)
+      sensitivity = NA_real_, concentration = sum(conc * r), observed_mass = NA_real_
     ))
   }
   out
@@ -411,7 +437,8 @@ xrf_quantify <- function(object, beam_energy_kev, detector_type = NULL,
 #' @export
 #'
 xrf_observed_mass <- function(object, beam_energy_kev, detector_type = NULL, be_window_um = NULL,
-                              dead_layer_um = NULL, active_thickness_um = NULL, efficiency = TRUE,
+                              dead_layer_um = NULL, active_thickness_um = NULL,
+                              air_path_cm = NULL, atmosphere = "Air", window = NULL, efficiency = TRUE,
                               excitation = c("photon", "electron"),
                               excitation_weighting = c("cross_section", "jump"),
                               coster_kronig = TRUE, tube = NULL,
@@ -432,6 +459,7 @@ xrf_observed_mass <- function(object, beam_energy_kev, detector_type = NULL, be_
   s <- xrf_fp_sensitivity(q$element, beam_energy_kev, detector_type = detector_type,
                           be_window_um = be_window_um, dead_layer_um = dead_layer_um,
                           active_thickness_um = active_thickness_um,
+                          air_path_cm = air_path_cm, atmosphere = atmosphere, window = window,
                           efficiency = efficiency, excitation = match.arg(excitation),
                           excitation_weighting = match.arg(excitation_weighting),
                           coster_kronig = coster_kronig, tube = tube)
@@ -513,6 +541,7 @@ xrf_observed_mass <- function(object, beam_energy_kev, detector_type = NULL, be_
 #'
 xrf_calibrate <- function(standards, values, beam_energy_kev, detector_type = NULL,
                           be_window_um = NULL, dead_layer_um = NULL, active_thickness_um = NULL,
+                          air_path_cm = NULL, atmosphere = "Air", window = NULL,
                           efficiency = TRUE,
                           excitation = c("photon", "electron"),
                           excitation_weighting = c("cross_section", "jump"), coster_kronig = TRUE,
@@ -539,6 +568,7 @@ xrf_calibrate <- function(standards, values, beam_energy_kev, detector_type = NU
   obs_list <- lapply(standards, function(st)
     xrf_observed_mass(st, beam_energy_kev, detector_type = detector_type, be_window_um = be_window_um,
                       dead_layer_um = dead_layer_um, active_thickness_um = active_thickness_um,
+                      air_path_cm = air_path_cm, atmosphere = atmosphere, window = window,
                       efficiency = efficiency, excitation = excitation,
                       excitation_weighting = excitation_weighting, coster_kronig = coster_kronig,
                       tube = tube, self_absorption = self_absorption, matrix = matrix,

@@ -1,17 +1,25 @@
 
-# Transmission through a primary-beam filter parsed from a tube$filter string like "Al" or "Al 100".
-# The number is a thickness in microns (default 100). Returns 1 (no filter) when unparseable.
+# Transmission through a primary-beam filter, parsed from a tube$filter string. Accepts a single filter
+# ("Al" or "Al 100") OR a stacked tri-filter like "Cu 100; Ti 25; Al 300" (as handhelds report): filters
+# are separated by ';' or ',', each "Element thickness_um" (thickness in microns, default 100), and their
+# transmissions multiply. Returns 1 (no attenuation) for any unparseable/absent spec.
 .xrf_filter_transmission <- function(filter, energy_kev) {
   if (is.null(filter) || length(filter) != 1 || is.na(filter) || !nzchar(trimws(filter))) {
     return(rep(1, length(energy_kev)))
   }
-  toks <- strsplit(trimws(as.character(filter)), "\\s+")[[1]]
-  mat <- toks[1]
-  if (!(mat %in% all_elements) && !(mat %in% c("CdTe"))) return(rep(1, length(energy_kev)))
-  thick_um <- suppressWarnings(as.numeric(toks[2])); if (is.na(thick_um)) thick_um <- 100
-  rho <- .xrf_material_info(mat)$density
-  if (!is.finite(rho)) return(rep(1, length(energy_kev)))   # unknown density -> no filter
-  exp(-xrf_mass_attenuation(mat, energy_kev, type = "total") * rho * thick_um * 1e-4)
+  parts <- strsplit(trimws(as.character(filter)), "\\s*[;,]\\s*")[[1]]
+  parts <- parts[nzchar(parts)]
+  trans <- rep(1, length(energy_kev))
+  for (p in parts) {
+    toks <- strsplit(trimws(p), "\\s+")[[1]]
+    mat <- toks[1]
+    # Any material .xrf_material_info knows: an element, CdTe, or a polymer window (polypropylene/Kapton/...).
+    info <- tryCatch(.xrf_material_info(mat), error = function(e) NULL)
+    if (is.null(info) || !is.finite(info$density) || info$density <= 0) next   # unknown/vacuum -> no attenuation
+    thick_um <- suppressWarnings(as.numeric(toks[2])); if (is.na(thick_um)) thick_um <- 100
+    trans <- trans * exp(-xrf_mass_attenuation(mat, energy_kev, type = "total") * info$density * thick_um * 1e-4)
+  }
+  trans
 }
 
 #' X-ray tube emission spectrum (Ebel model)

@@ -76,6 +76,7 @@ xrf_add_deconvolution_gls <- function(.spectra, .energy_kev = .data$.spectra$ene
                                       efficiency = FALSE, escape = FALSE,
                                       be_window_um = NULL, dead_layer_um = NULL,
                                       active_thickness_um = NULL,
+                                      air_path_cm = NULL, atmosphere = "Air", window = NULL,
                                       nonneg = TRUE, weighting = c("auto", "poisson", "none"),
                                       .counts = NULL, .livetime = NULL,
                                       tube = NULL, geometry = NULL,
@@ -99,6 +100,9 @@ xrf_add_deconvolution_gls <- function(.spectra, .energy_kev = .data$.spectra$ene
   be_window_um <- enquo(be_window_um)
   dead_layer_um <- enquo(dead_layer_um)
   active_thickness_um <- enquo(active_thickness_um)
+  air_path_cm <- enquo(air_path_cm)
+  atmosphere <- enquo(atmosphere)
+  window <- enquo(window)
   nonneg <- enquo(nonneg)
   weighting <- enquo(weighting)
   .counts <- enquo(.counts)
@@ -135,6 +139,7 @@ xrf_add_deconvolution_gls <- function(.spectra, .energy_kev = .data$.spectra$ene
     be_window_um = !!be_window_um,
     dead_layer_um = !!dead_layer_um,
     active_thickness_um = !!active_thickness_um,
+    air_path_cm = !!air_path_cm, atmosphere = !!atmosphere, window = !!window,
     nonneg = !!nonneg,
     weighting = !!weighting,
     counts = !!.counts,
@@ -166,6 +171,7 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
                                                    efficiency = FALSE, escape = FALSE,
                                                    be_window_um = NULL, dead_layer_um = NULL,
                                                    active_thickness_um = NULL,
+                                                   air_path_cm = NULL, atmosphere = "Air", window = NULL,
                                                    nonneg = TRUE,
                                                    weighting = c("auto", "poisson", "none"),
                                                    counts = NULL, livetime = NULL,
@@ -223,7 +229,8 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
     peaks$relative_peak_intensity <- peaks$relative_peak_intensity *
       xrf_detector_efficiency(peaks$energy_kev, detector_type = detector_type,
                               active_thickness_um = active_thickness_um,
-                              be_window_um = be_window_um, dead_layer_um = dead_layer_um)
+                              be_window_um = be_window_um, dead_layer_um = dead_layer_um,
+                              air_path_cm = air_path_cm, atmosphere = atmosphere, window = window)
   }
 
   # Optional escape peaks: satellites at (parent energy - detector K X-ray), tied to the parent's

@@ -20,10 +20,25 @@
     NULL
   )
   if (!is.null(cmp)) return(cmp)
+  # Common measurement-path materials: the atmosphere (air / helium) and thin polymer snout/detector
+  # windows. Compositions are element mass fractions; densities in g/cm^3. Matched case-insensitively with
+  # a few aliases. (Air drops negligible Kr; polymers include H.)
+  cmp <- switch(
+    tolower(m),
+    "air"                        = list(density = 0.0012048, composition = c(N = 0.7553, O = 0.2318, Ar = 0.0128, C = 0.000124)),
+    "he" = , "helium"           = list(density = 0.0001786, composition = c(He = 1.0)),
+    "vacuum" = , "none"         = list(density = 0,         composition = c(He = 1.0)),   # no attenuation
+    "polypropylene" = , "pp" = , "prolene" = list(density = 0.905, composition = c(C = 0.8563, H = 0.1437)),
+    "kapton" = , "polyimide"    = list(density = 1.42,  composition = c(C = 0.6911, H = 0.0264, N = 0.0733, O = 0.2092)),
+    "mylar" = , "pet"           = list(density = 1.40,  composition = c(C = 0.625017, H = 0.041959, O = 0.333025)),
+    NULL
+  )
+  if (!is.null(cmp)) return(cmp)
   if (m %in% all_elements) {
     return(list(density = unname(.xrf_element_density[m]), composition = stats::setNames(1, m)))
   }
-  stop("Unknown material '", m, "'. Use an element symbol or the compound CdTe.")
+  stop("Unknown material '", m, "'. Use an element symbol, CdTe, or a known path material ",
+       "(Air, He, polypropylene, Kapton, Mylar).")
 }
 
 # Total photoelectric mass attenuation (cm^2/g) of a single element vs energy, with log-log
@@ -146,10 +161,26 @@ xrf_mass_attenuation <- function(material, energy_kev, type = c("photoelectric",
 #'
 xrf_detector_efficiency <- function(energy_kev, detector_type = NULL, active_material = NULL,
                                     active_thickness_um = NULL, be_window_um = NULL,
-                                    dead_layer_um = NULL) {
+                                    dead_layer_um = NULL,
+                                    air_path_cm = NULL, atmosphere = "Air", window = NULL) {
   geom <- .resolve_detector_geometry(detector_type, active_material, active_thickness_um,
                                      be_window_um, dead_layer_um)
   cm_per_um <- 1e-4
+
+  # Measurement-path attenuation between the sample and the detector's Be window: the atmosphere over the
+  # air path (air, or ~transparent helium), and any polymer snout/detector window(s) such as a 4 um
+  # polypropylene foil ("window" is a filter-style spec in microns, and may be a stack "Kapton 8;
+  # polypropylene 4"). Both mainly cut low-energy lines, on top of the Be window / dead layer / active
+  # absorption below.
+  t_path <- rep(1, length(energy_kev))
+  if (!is.null(air_path_cm) && is.finite(air_path_cm) && air_path_cm > 0) {
+    atm <- if (is.null(atmosphere) || is.na(atmosphere) || !nzchar(trimws(as.character(atmosphere)))) "Air" else atmosphere
+    ainfo <- tryCatch(.xrf_material_info(atm), error = function(e) NULL)
+    if (!is.null(ainfo) && is.finite(ainfo$density) && ainfo$density > 0) {
+      t_path <- t_path * exp(-xrf_mass_attenuation(atm, energy_kev, type = "total") * ainfo$density * air_path_cm)
+    }
+  }
+  t_window <- .xrf_filter_transmission(window, energy_kev)   # 1 when no window given
 
   # window and dead layer attenuate by ANY interaction -> total mu; the active volume records only
   # photoelectric events in the full-energy peak -> photoelectric mu.
@@ -165,5 +196,5 @@ xrf_detector_efficiency <- function(energy_kev, detector_type = NULL, active_mat
   a_active <- 1 - exp(-xrf_mass_attenuation(geom$active_material, energy_kev, type = "photoelectric") *
                         act_rho * geom$active_thickness_um * cm_per_um)
 
-  pmin(pmax(t_win * t_dead * a_active, 0), 1)
+  pmin(pmax(t_path * t_window * t_win * t_dead * a_active, 0), 1)
 }
