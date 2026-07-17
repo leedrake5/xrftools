@@ -84,7 +84,8 @@ xrf_add_deconvolution_gls <- function(.spectra, .energy_kev = .data$.spectra$ene
                                       tail = 0, step = 0, beta = NULL,
                                       cache_templates = TRUE, refine_calibration = FALSE,
                                       sum_peaks = FALSE, count_rate = NULL, pileup_tau = NULL,
-                                      use_qr = TRUE, .env = parent.frame()) {
+                                      use_qr = TRUE, abundance_prior = 0, abundance_ref_ppm = 100,
+                                      .env = parent.frame()) {
   .energy_kev <- enquo(.energy_kev)
   .values <- enquo(.values)
   peaks <- enquo(peaks)
@@ -120,6 +121,8 @@ xrf_add_deconvolution_gls <- function(.spectra, .energy_kev = .data$.spectra$ene
   count_rate <- enquo(count_rate)
   pileup_tau <- enquo(pileup_tau)
   use_qr <- enquo(use_qr)
+  abundance_prior <- enquo(abundance_prior)
+  abundance_ref_ppm <- enquo(abundance_ref_ppm)
 
   xrf_add_deconvolution_fun(
     .spectra,
@@ -157,6 +160,8 @@ xrf_add_deconvolution_gls <- function(.spectra, .energy_kev = .data$.spectra$ene
     count_rate = !!count_rate,
     pileup_tau = !!pileup_tau,
     use_qr = !!use_qr,
+    abundance_prior = !!abundance_prior,
+    abundance_ref_ppm = !!abundance_ref_ppm,
     .env = .env
   )
 }
@@ -181,7 +186,8 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
                                                    cache_templates = TRUE, refine_calibration = FALSE,
                                                    sum_peaks = FALSE, count_rate = NULL,
                                                    pileup_tau = NULL,
-                                                   use_qr = TRUE) {
+                                                   use_qr = TRUE,
+                                                   abundance_prior = 0, abundance_ref_ppm = 100) {
 
   # ---- true two-pass pile-up correction (#E3) ----------------------------------------------------
   # When a pulse-pair resolution time `pileup_tau` (s) is supplied with counts + livetime, model the
@@ -422,6 +428,16 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
   n <- length(response)
   p <- ncol(X)
 
+  # ---- abundance-informed ridge prior (opt-in; #abundance) ---------------------------------------
+  # Per-column penalty factor ~ 1/crustal_abundance (0 for scatter_*/sum_* and off-table columns). The
+  # absolute penalty applied in solve_fit is `abundance_prior * data_scale * pen_factor`, so a degenerate
+  # overlap splits toward the more abundant element; strength 0 disables it (identical legacy fit).
+  use_prior <- is.finite(abundance_prior) && abundance_prior > 0
+  # pen_factor = (1/abundance) x collinearity, so only rare AND overlap-confounded columns are penalised.
+  pen_factor <- if (use_prior)
+      .xrf_abundance_penalty_factor(elements, abundance_ref_ppm) * .xrf_template_collinearity(X)
+    else rep(0, p)
+
   # ---- counting-statistics weighting -------------------------------------------------------------
   # var(response_i [cps]) = gross_counts_i / livetime^2 (Poisson), so w_i = livetime^2 / gross_counts.
   # `response` is net (baseline-subtracted) cps; gross counts are reconstructed from `counts`.
@@ -443,6 +459,18 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
     rw <- sqrt(w)
     Xw <- X * rw          # row-scale (recycles rw down each column)
     yw <- response * rw
+    if (use_prior && any(pen_factor > 0)) {
+      # Tikhonov augmentation: append p pseudo-observation rows sqrt(lambda_j) with target 0, so the
+      # solve minimises ||W^1/2(y-Xb)||^2 + sum lambda_j b_j^2. lambda scales to the data (mean column
+      # self-energy) so `abundance_prior` is a dimensionless strength; penalty rows carry weight 1 (a
+      # prior is not a Poisson observation), so this is correct on every IRLS reweighting pass.
+      scale <- mean(colSums(Xw^2))
+      if (is.finite(scale) && scale > 0) {
+        lambda <- abundance_prior * scale * pen_factor
+        Xw <- rbind(Xw, diag(sqrt(lambda), p, p))
+        yw <- c(yw, rep(0, p))
+      }
+    }
     if (nonneg) {
       nn <- nnls::nnls(Xw, yw)
       active <- if (nn$nsetp > 0) sort(nn$passive[seq_len(nn$nsetp)]) else integer(0)
@@ -459,6 +487,11 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
     } else if (use_qr) {
       cf <- qr.coef(qr(Xw), yw)
       aliased <- which(is.na(cf))     # rank-deficient columns pivoted out by the QR
+      cf[aliased] <- 0
+      list(coef = cf, active = setdiff(seq_len(p), aliased), aliased = aliased)
+    } else if (use_prior && any(pen_factor > 0)) {
+      cf <- qr.coef(qr(Xw), yw)      # lm.wfit can't take the penalty rows; ridge via augmented QR
+      aliased <- which(is.na(cf))
       cf[aliased] <- 0
       list(coef = cf, active = setdiff(seq_len(p), aliased), aliased = aliased)
     } else {
