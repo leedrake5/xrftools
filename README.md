@@ -366,7 +366,7 @@ The physical models used above draw on the following literature (links resolve t
 
 **Modern methods & atomic data (roadmap)**
 
-These inform ongoing modernization (see `MODERNIZATION_PLAN.md`); the current release still derives its atomic data from EPDL97/EADL97 (above), and its deconvolution from the Gaussian-template least squares described here.
+These inform ongoing modernization the current release still derives its atomic data from EPDL97/EADL97 (above), and its deconvolution from the Gaussian-template least squares described here.
 
 - Elam, W.T., Ravel, B.D., Sieber, J.R. (2002). A new atomic database for X-ray spectroscopic calculations. *Radiation Physics and Chemistry* **63**(2), 121–128 — a consolidated modern replacement for the EPDL/EADL tables. [doi:10.1016/S0969-806X(01)00227-4](https://doi.org/10.1016/S0969-806X%2801%2900227-4)
 - Chantler, C.T. (2000). Detailed tabulation of atomic form factors, photoelectric absorption and scattering cross section (FFAST). *Journal of Physical and Chemical Reference Data* **29**(4), 597–1056 — relativistic near-edge cross sections. [doi:10.1063/1.1321055](https://doi.org/10.1063/1.1321055)
