@@ -84,6 +84,18 @@
 #' @rdname x_ray_cross_sections
 "x_ray_coster_kronig_probabilities"
 
+#' Coster-Kronig transition probabilities (modern Elam 2002 source)
+#'
+#' A drop-in modern alternative to \link{x_ray_coster_kronig_probabilities}, parsed from the Elam, Ravel &
+#' Sieber (2002) database (via the XrayDB project); identical schema. Opt in with
+#' \code{xrf_set_ck_source("Elam")} (or \code{options(xrftools.ck_source = "Elam")}) --
+#' \link{xrf_coster_kronig_probability} and the L/M cascades then read these values. Differs from EADL97 most
+#' for the L1 transitions (up to ~40 percent for heavy elements), reshaping heavy-element L-line ratios.
+#'
+#' @source Elam, W.T., Ravel, B.D., Sieber, J.R. (2002). \emph{Radiation Physics and Chemistry} 63, 121-128.
+#' @seealso \link{x_ray_coster_kronig_probabilities}
+"x_ray_coster_kronig_probabilities_elam"
+
 #' XRF quantification energies
 #'
 #' A form of \link{x_ray_energies} in a more suitable form for XRF quantification.

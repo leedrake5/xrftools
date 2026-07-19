@@ -43,6 +43,22 @@
 #'   enables them when a \code{tube} is supplied; \code{TRUE}/\code{FALSE} force on/off.
 #' @param compton_broadening Multiplier on the detector width for the Doppler-broadened Compton
 #'   peak (passed to \link{xrf_scatter_peaks}).
+#' @param scatter_continuum If TRUE (needs a \code{tube}), also add scattered-\emph{continuum} templates
+#'   (Rayleigh + Compton of the tube bremsstrahlung, \link{xrf_scatter_continuum}) -- the broad scatter
+#'   background / Compton hump that \link{xrf_scatter_peaks} (anode lines only) misses. Default FALSE.
+#'   \strong{Working recipe:} fit against an UN-baselined response (\code{.values = cps}) together with a
+#'   fitted \code{background} (6-12), so the continuum + background REPLACE the SNIP baseline. This recovers
+#'   trace areas cleanly (r^2 = 1 on synthetics; SNIP-only over-estimates traces 100-300\% under a Compton
+#'   hump). Enabling it on the default baseline-subtracted \code{.values = cps - baseline}, or without a
+#'   fitted \code{background}, double-counts the baseline and biases real peaks -- a warning then fires.
+#' @param scatter_scatterer Representative sample scatterer setting the continuum shape (see
+#'   \link{xrf_scatter_continuum}); default "Si".
+#' @param background Number of broad, non-negative Gaussian background basis functions to fit jointly with
+#'   the peaks (default 0 = off). When \eqn{\ge 1}, the deconvolution models a smooth background \emph{as
+#'   part of the fit}, so you can feed it an \strong{un-baselined} response (\code{.values = cps}) instead
+#'   of pre-subtracting a SNIP baseline. This is the intended companion to \code{scatter_continuum}: with a
+#'   fitted background there is no subtracted baseline for the broad scatter templates to double-count, so
+#'   real trace areas are preserved. Excluded from quantification. Typical values ~6-12.
 #' @param tail,step,beta Hypermet line-shape parameters (passed to \link{xrf_lineshape}): relative
 #'   low-energy tail amplitude, shelf/step amplitude, and tail decay length. Defaults (0, 0, NULL)
 #'   give a pure Gaussian. The reported \code{peak_area} includes the tail area when \code{tail > 0}.
@@ -63,6 +79,39 @@
 #' @param use_qr If TRUE (default) unconstrained fits (\code{nonneg = FALSE}) use fast QR
 #'   decomposition; set FALSE for fork-safe \code{lm()} under multicore parallelism. Ignored when
 #'   \code{nonneg = TRUE}.
+#' @param abundance_prior Strength of an optional crustal-abundance ridge prior (default 0 = off, an
+#'   identical fit). When > 0, each element template is shrunk with a penalty proportional to
+#'   \code{abundance_ref_ppm}/(crustal abundance), \strong{gated} by a variance-inflation-factor
+#'   identifiability weight so only columns that are \emph{both} rare \emph{and} not separately estimable
+#'   are penalised (\link{x_ray_xrf_energies}; see \code{R/abundance.R}). This resolves degenerate
+#'   overlaps (e.g. a rare element's lines coinciding with an abundant one's) toward the more abundant
+#'   element. Typical useful strengths are ~0.1-0.5. \strong{Caveat:} it is a biasing prior -- a
+#'   genuinely-present but truly-unresolvable trace that overlaps a common line can be shrunk low, so leave
+#'   it at 0 for the most defensible trace quantification and raise it only to suppress phantom peaks.
+#' @param abundance_ref_ppm Pivot abundance (ppm) at which the abundance penalty factor equals 1 (default
+#'   100); elements rarer than this get a larger penalty factor, more abundant ones a smaller one. Only
+#'   used when \code{abundance_prior > 0}.
+#' @param abundance_protect Character vector of element symbols to \strong{exempt} from the abundance prior
+#'   (never penalised). Use it to protect elements you know are present -- in particular heavy elements read
+#'   via L-lines that overlap an abundant K-line or the scatter peak (Pb L\eqn{\alpha} under As K\eqn{\alpha},
+#'   U L\eqn{\gamma} under the Rayleigh line), which the VIF gate would otherwise read as unidentifiable and
+#'   crush. Protecting them makes the tiebreaker explicit: at each coincidence the prior penalises only the
+#'   rare unprotected competitor, so the shared intensity flows to the protected element while phantoms are
+#'   still removed. Default none. Only used when \code{abundance_prior > 0}.
+#' @param abundance_ppm Optional named numeric vector of per-element abundances (ppm by mass) that
+#'   \strong{override} the built-in crustal reference for the named elements -- e.g. a known matrix
+#'   \code{c(Fe = 7e5, Cr = 1.8e5, Ni = 8e4)} so its major/known elements are not treated as "rare" and
+#'   penalised. Elements not named keep their crustal default. Only used when \code{abundance_prior > 0}.
+#' @param prior Form of the abundance penalty: \code{"ridge"} (default, L2 Tikhonov, legacy behaviour),
+#'   \code{"lasso"} (L1) or \code{"elastic_net"} (an L1/L2 mix, \code{enet_alpha}). All three reuse the same
+#'   VIF / clean-line / \code{abundance_protect} gating and the same \code{abundance_prior} strength; the L1
+#'   forms are realised by iteratively reweighted L2 (a majorize-minimize scheme, no extra dependency) and
+#'   snap penalised-and-shrunken columns to \strong{exactly} zero. \strong{Note:} under the default
+#'   non-negativity, NNLS already zeros clearly-absent elements, so the L1 forms differ from the ridge mainly
+#'   (a) in the unconstrained \code{nonneg = FALSE} fit (where they zero what least squares would leave
+#'   non-zero) and (b) by removing confounded rare columns more aggressively.
+#' @param enet_alpha Elastic-net mixing in [0,1] for \code{prior = "elastic_net"} (1 = lasso, 0 = ridge-like);
+#'   default 0.5. Ignored otherwise.
 #'
 #' @return A modified version of .spectra
 #' @export
@@ -81,10 +130,14 @@ xrf_add_deconvolution_gls <- function(.spectra, .energy_kev = .data$.spectra$ene
                                       .counts = NULL, .livetime = NULL,
                                       tube = NULL, geometry = NULL,
                                       scatter = NULL, compton_broadening = 2,
+                                      scatter_continuum = FALSE, scatter_scatterer = "Si",
+                                      background = 0L,
                                       tail = 0, step = 0, beta = NULL,
                                       cache_templates = TRUE, refine_calibration = FALSE,
                                       sum_peaks = FALSE, count_rate = NULL, pileup_tau = NULL,
                                       use_qr = TRUE, abundance_prior = 0, abundance_ref_ppm = 100,
+                                      abundance_protect = character(0), abundance_ppm = NULL,
+                                      prior = c("ridge", "lasso", "elastic_net"), enet_alpha = 0.5,
                                       .env = parent.frame()) {
   .energy_kev <- enquo(.energy_kev)
   .values <- enquo(.values)
@@ -112,6 +165,9 @@ xrf_add_deconvolution_gls <- function(.spectra, .energy_kev = .data$.spectra$ene
   geometry <- enquo(geometry)
   scatter <- enquo(scatter)
   compton_broadening <- enquo(compton_broadening)
+  scatter_continuum <- enquo(scatter_continuum)
+  scatter_scatterer <- enquo(scatter_scatterer)
+  background <- enquo(background)
   tail <- enquo(tail)
   step <- enquo(step)
   beta <- enquo(beta)
@@ -123,6 +179,10 @@ xrf_add_deconvolution_gls <- function(.spectra, .energy_kev = .data$.spectra$ene
   use_qr <- enquo(use_qr)
   abundance_prior <- enquo(abundance_prior)
   abundance_ref_ppm <- enquo(abundance_ref_ppm)
+  abundance_protect <- enquo(abundance_protect)
+  abundance_ppm <- enquo(abundance_ppm)
+  prior <- enquo(prior)
+  enet_alpha <- enquo(enet_alpha)
 
   xrf_add_deconvolution_fun(
     .spectra,
@@ -151,6 +211,9 @@ xrf_add_deconvolution_gls <- function(.spectra, .energy_kev = .data$.spectra$ene
     geometry = !!geometry,
     scatter = !!scatter,
     compton_broadening = !!compton_broadening,
+    scatter_continuum = !!scatter_continuum,
+    scatter_scatterer = !!scatter_scatterer,
+    background = !!background,
     tail = !!tail,
     step = !!step,
     beta = !!beta,
@@ -162,6 +225,10 @@ xrf_add_deconvolution_gls <- function(.spectra, .energy_kev = .data$.spectra$ene
     use_qr = !!use_qr,
     abundance_prior = !!abundance_prior,
     abundance_ref_ppm = !!abundance_ref_ppm,
+    abundance_protect = !!abundance_protect,
+    abundance_ppm = !!abundance_ppm,
+    prior = !!prior,
+    enet_alpha = !!enet_alpha,
     .env = .env
   )
 }
@@ -182,12 +249,16 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
                                                    counts = NULL, livetime = NULL,
                                                    tube = NULL, geometry = NULL,
                                                    scatter = NULL, compton_broadening = 2,
+                                                   scatter_continuum = FALSE, scatter_scatterer = "Si",
+                                                   background = 0L,
                                                    tail = 0, step = 0, beta = NULL,
                                                    cache_templates = TRUE, refine_calibration = FALSE,
                                                    sum_peaks = FALSE, count_rate = NULL,
                                                    pileup_tau = NULL,
                                                    use_qr = TRUE,
-                                                   abundance_prior = 0, abundance_ref_ppm = 100) {
+                                                   abundance_prior = 0, abundance_ref_ppm = 100,
+                                                   abundance_protect = character(0), abundance_ppm = NULL,
+                                                   prior = c("ridge", "lasso", "elastic_net"), enet_alpha = 0.5) {
 
   # ---- true two-pass pile-up correction (#E3) ----------------------------------------------------
   # When a pulse-pair resolution time `pileup_tau` (s) is supplied with counts + livetime, model the
@@ -206,12 +277,17 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
                                                   sum_peaks = FALSE, pileup_tau = NULL)))
     if (nrow(pu$peaks) > 0) {
       pass2$peaks <- dplyr::bind_rows(pass2$peaks, pu$peaks)
-      pass2$response$response_fit <- pass2$response$response_fit + pu$model
+      # pu$model is built on the FULL input grid, but pass2 filters to the fit window, so its
+      # response_fit is only the in-window channels. Subset pu$model to the same window before
+      # adding (otherwise the lengths differ -> hard error whenever energy_min/max restrict the grid).
+      pu_within <- (energy_kev >= energy_min_kev) & (energy_kev <= energy_max_kev)
+      pass2$response$response_fit <- pass2$response$response_fit + pu$model[pu_within]
     }
     return(pass2)
   }
 
   weighting <- match.arg(weighting)
+  prior <- match.arg(prior)
 
   stopifnot(
     "energy_kev" %in% colnames(peaks),
@@ -266,6 +342,56 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
     peaks <- dplyr::bind_rows(peaks, scatter_peaks)
   }
 
+  # Optional scattered bremsstrahlung CONTINUUM templates (Rayleigh + Compton of the tube continuum, #E1),
+  # opt-in via scatter_continuum = TRUE (needs a tube). Two extra fixed-shape free-amplitude "elements".
+  # IMPORTANT: these model the smooth scatter BACKGROUND, so they must be fit against a spectrum whose
+  # background is NOT already removed, together with a fitted background (`background >= 1`). The working
+  # recipe is: `.values = cps` (UN-baselined) + `scatter_continuum = TRUE` + `background = 6..12`, which
+  # recovers trace areas cleanly (validated to r2 = 1 on synthetics, incl. a case where SNIP-only over-
+  # estimates traces by 100-300% under a Compton hump). If instead `response` is baseline-subtracted (the
+  # default `.values = cps - baseline`), SNIP has already removed most of this continuum and the broad
+  # templates then bleed real peak area -- hence the warning when no fitted background accompanies it.
+  if (isTRUE(scatter_continuum)) {
+    if (is.null(tube) || !inherits(tube, "xrf_tube")) {
+      stop("scatter_continuum = TRUE requires tube = xrf_tube(...).")
+    }
+    if (!(is.numeric(background) && length(background) == 1 && isTRUE(background >= 1))) {
+      warning("scatter_continuum = TRUE models the scatter BACKGROUND and needs a companion fitted ",
+              "background: use `.values = cps` (UN-baselined) with `background = 6..12`. Without a fitted ",
+              "background (or on a SNIP-baseline-subtracted response) the broad continuum templates ",
+              "double-count the baseline and bias real peak areas.", call. = FALSE)
+    }
+    cont_peaks <- xrf_scatter_continuum(
+      tube, if (is.null(geometry)) xrf_geometry() else geometry,
+      detector_type = detector_type, fano = fano, epsilon_ev = epsilon_ev,
+      noise_fwhm_ev = noise_fwhm_ev, default_sigma = default_sigma,
+      compton_broadening = compton_broadening, scatterer = scatter_scatterer
+    )
+    if (nrow(cont_peaks) > 0) peaks <- dplyr::bind_rows(peaks, cont_peaks)
+  }
+
+  # Optional fittable smooth background basis (#E1 baseline reconciliation): `background` broad, non-negative
+  # Gaussian bumps spanning the fit window, fit jointly with the peaks so the deconvolution models the
+  # continuum/background ITSELF -- fed an UN-baselined spectrum (.values = cps) -- instead of pre-subtracting
+  # a SNIP baseline. This is what lets scatter_continuum work without double-counting: with a fitted
+  # background (+ scattered-continuum templates) there is no subtracted baseline to bleed real trace area
+  # into. Each bump is a free-amplitude "element" (background_k), excluded from quantification. Default 0 = off.
+  if (is.numeric(background) && length(background) == 1 && isTRUE(background >= 1)) {
+    nb <- as.integer(background)
+    elo <- max(min(energy_kev), energy_min_kev); ehi <- min(max(energy_kev), energy_max_kev)
+    if (is.finite(elo) && is.finite(ehi) && ehi > elo) {
+      # nb == 1: one broad bump CENTERED on the window (not at the low edge, which gave a lopsided ramp);
+      # nb >= 2: evenly spaced, overlapping (sigma >> detector line width).
+      bg_E <- if (nb == 1) (elo + ehi) / 2 else seq(elo, ehi, length.out = nb)
+      bg_sigma <- if (nb == 1) (ehi - elo) / 2 else (ehi - elo) / (nb - 1)
+      peaks <- dplyr::bind_rows(peaks, tibble::tibble(
+        element = paste0("background_", seq_len(nb)),
+        trans = paste0("bg_", seq_len(nb)),
+        energy_kev = bg_E, sigma = bg_sigma, relative_peak_intensity = 1
+      ))
+    }
+  }
+
   # Per-line peak width: an explicit `sigma` column wins; otherwise, if any detector-resolution
   # parameter is given, compute the energy-dependent sigma(E); otherwise fall back to the constant
   # default_sigma. A single constant width is only correct near ~8-10 keV, so a detector model is
@@ -290,8 +416,19 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
   # model; the pile-up rate scales with `count_rate` (used only to skip the step when clearly low).
   if (isTRUE(sum_peaks) && (is.null(count_rate) || count_rate > 0)) {
     lc <- peaks[is.finite(peaks$energy_kev) & is.finite(peaks$sigma) &
-                  peaks$relative_peak_intensity > 0, , drop = FALSE]
-    lc <- lc[order(-lc$relative_peak_intensity), , drop = FALSE]
+                  peaks$relative_peak_intensity > 0 &
+                  !grepl("^(scatter|background|sum|pileup|escape)_", peaks$element), , drop = FALSE]
+    # Rank candidate pile-up parents by their actual amplitude IN THE DATA (pile-up scales with the line
+    # count rate), not the raw per-element template `relative_peak_intensity`, which is not comparable
+    # across elements (every element's primary line is ~1). Use the peak response within +/- sigma of each
+    # line as a cheap, cross-element-comparable amplitude proxy so the sum templates land on the sums of the
+    # genuinely dominant peaks. (Spurious templates are harmless -- NNLS zeros them -- but a MISSED true
+    # pile-up location is not corrected, which is what the old template-intensity ranking risked.)
+    amp_proxy <- vapply(seq_len(nrow(lc)), function(k) {
+      inw <- energy_kev >= lc$energy_kev[k] - lc$sigma[k] & energy_kev <= lc$energy_kev[k] + lc$sigma[k]
+      if (any(inw)) max(response[inw]) else 0
+    }, numeric(1))
+    lc <- lc[order(-amp_proxy), , drop = FALSE]
     max_lines <- min(nrow(lc), 5L)
     if (max_lines >= 1) {
       lc <- lc[seq_len(max_lines), ]
@@ -391,12 +528,23 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
   # E' = zero + gain * E of the template centroids by variable projection: for each (zero, gain) the
   # amplitudes are solved (fast NNLS) and the residual sum of squares minimized over (zero, gain).
   if (isTRUE(refine_calibration)) {
+    # Weight the calibration objective (and its inner solve) by counting statistics -- Poisson data weights
+    # w = livetime^2 / gross_counts when counts/livetime are available, else a variance proxy 1/max(response, .)
+    # -- so the (zero, gain) alignment is not dominated by the few tallest peaks and weak low-energy lines get
+    # their statistical say (consistent with the weighted final fit rather than the old unweighted RSS).
+    w_ref <- if (!is.null(counts) && !is.null(livetime) && length(livetime) == 1 &&
+                 is.finite(livetime) && livetime > 0 && length(counts) == length(response)) {
+      livetime^2 / pmax(counts, 1)
+    } else {
+      1 / pmax(response, max(response, na.rm = TRUE) * 1e-3, 1)
+    }
+    rw_ref <- sqrt(w_ref)
     rss_for <- function(par) {
       pk <- peaks_tmpl
       pk$energy_kev <- par[1] + par[2] * pk$energy_kev
       Xc <- build_X(pk)$X
-      cf <- nnls::nnls(Xc, response)$x
-      sum((response - as.vector(Xc %*% cf)) ^ 2)
+      cf <- nnls::nnls(Xc * rw_ref, response * rw_ref)$x
+      sum((response - as.vector(Xc %*% cf)) ^ 2 * w_ref)
     }
     opt <- tryCatch(
       stats::optim(c(0, 1), rss_for, method = "Nelder-Mead",
@@ -433,10 +581,31 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
   # absolute penalty applied in solve_fit is `abundance_prior * data_scale * pen_factor`, so a degenerate
   # overlap splits toward the more abundant element; strength 0 disables it (identical legacy fit).
   use_prior <- is.finite(abundance_prior) && abundance_prior > 0
-  # pen_factor = (1/abundance) x collinearity, so only rare AND overlap-confounded columns are penalised.
-  pen_factor <- if (use_prior)
-      .xrf_abundance_penalty_factor(elements, abundance_ref_ppm) * .xrf_template_collinearity(X)
-    else rep(0, p)
+  # Composition-independent abundance factor ~ 1/crustal_abundance, computed once. It is gated per solve
+  # by a VIF identifiability weight on the WEIGHTED design (inside solve_fit, so it updates each IRLS pass
+  # and reflects the problem the solver sees), so only rare AND non-identifiable columns are penalised.
+  pf_abund <- if (use_prior) .xrf_abundance_penalty_factor(elements, abundance_ref_ppm, abundance = abundance_ppm) else rep(0, p)
+  # Protect user-specified elements from the abundance prior (pen_factor 0 -> never shrunk). This is the
+  # abundance-tiebreaker made explicit: an element you KNOW is present (e.g. Pb/U read via L-lines that
+  # overlap an abundant K-line or the scatter peak) keeps its intensity, so at the coincidence the prior
+  # penalises only the rare, unprotected competitor and the shared area flows to the protected element.
+  # (The VIF gate otherwise reads a heavy-L element whose STRONG lines overlap as unidentifiable -- even
+  # when it has a weaker clean line -- and crushes it.)
+  if (use_prior && length(abundance_protect)) {
+    pf_abund[elements %in% as.character(abundance_protect)] <- 0
+  }
+  # Element columns only (exclude scatter/background/continuum/sum/pileup pseudo-elements): the abundance
+  # ridge's data-scale is computed over these so that enabling the broad `background` / scatter-continuum
+  # templates -- whose column self-energies are ~10-30x an element line's -- does not silently inflate the
+  # effective `abundance_prior` strength.
+  is_element_col <- !grepl("^(background|scatter|sum|pileup|escape)_", elements)
+  if (!any(is_element_col)) is_element_col <- rep(TRUE, p)
+  # F2: elements with a spectrally isolated (clean) line are identifiable even if their STRONG lines overlap
+  # another template, so exempt them from the abundance penalty -- an imprecise-but-estimable trace must not
+  # be crushed (e.g. As via its clean Kbeta when As Kalpha overlaps Pb Lalpha). Computed once on the fixed
+  # template shapes; only meaningful when the prior is active.
+  clean_exempt <- if (use_prior && any(pf_abund > 0))
+    .xrf_clean_line_exempt(peaks_tmpl, X, elements, is_element_col, energy_kev) else rep(FALSE, p)
 
   # ---- counting-statistics weighting -------------------------------------------------------------
   # var(response_i [cps]) = gross_counts_i / livetime^2 (Poisson), so w_i = livetime^2 / gross_counts.
@@ -459,16 +628,33 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
     rw <- sqrt(w)
     Xw <- X * rw          # row-scale (recycles rw down each column)
     yw <- response * rw
-    if (use_prior && any(pen_factor > 0)) {
+    ridge_applied <- FALSE
+    penalty <- rep(0, p)          # effective per-column L2 penalty applied (0 = unpenalised); for the Laplace SE
+    if (use_prior && any(pf_abund > 0)) {
+      # VIF identifiability gate on the WEIGHTED design actually being solved: an estimable column
+      # (VIF ~ 1) is left unpenalised even if it spectrally overlaps another, so only genuinely
+      # non-identifiable rare columns are shrunk.
+      pen_factor <- pf_abund * .xrf_template_vif_weight(Xw)
+      pen_factor[clean_exempt] <- 0   # F2: never penalise an element that has a clean (isolated) line
       # Tikhonov augmentation: append p pseudo-observation rows sqrt(lambda_j) with target 0, so the
       # solve minimises ||W^1/2(y-Xb)||^2 + sum lambda_j b_j^2. lambda scales to the data (mean column
       # self-energy) so `abundance_prior` is a dimensionless strength; penalty rows carry weight 1 (a
       # prior is not a Poisson observation), so this is correct on every IRLS reweighting pass.
-      scale <- mean(colSums(Xw^2))
-      if (is.finite(scale) && scale > 0) {
+      scale <- mean(colSums(Xw[, is_element_col, drop = FALSE]^2))
+      if (any(pen_factor > 0) && is.finite(scale) && scale > 0) {
+        # L1 / elastic-net path (IRL2, .xrf_irl2_fit): penalise |b_j| (and, for elastic_net, also b_j^2) with the SAME
+        # per-column gated penalty factor as the ridge, so only rare AND non-identifiable columns are shrunk
+        # -- but lasso drives them to EXACTLY zero (sparse element selection) rather than merely shrinking.
+        if (prior != "ridge") {
+          return(.xrf_irl2_fit(X, response, rw, scale, pen_factor,
+                               alpha = if (prior == "lasso") 1 else enet_alpha,
+                               strength = abundance_prior, nonneg = nonneg, p = p))
+        }
         lambda <- abundance_prior * scale * pen_factor
+        penalty <- lambda
         Xw <- rbind(Xw, diag(sqrt(lambda), p, p))
         yw <- c(yw, rep(0, p))
+        ridge_applied <- TRUE
       }
     }
     if (nonneg) {
@@ -483,22 +669,22 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
         active <- active[cf[active] > tol]
       }
       cf[setdiff(seq_len(p), active)] <- 0
-      list(coef = cf, active = active, aliased = integer(0))
+      list(coef = cf, active = active, aliased = integer(0), penalty = penalty)
     } else if (use_qr) {
       cf <- qr.coef(qr(Xw), yw)
       aliased <- which(is.na(cf))     # rank-deficient columns pivoted out by the QR
       cf[aliased] <- 0
-      list(coef = cf, active = setdiff(seq_len(p), aliased), aliased = aliased)
-    } else if (use_prior && any(pen_factor > 0)) {
+      list(coef = cf, active = setdiff(seq_len(p), aliased), aliased = aliased, penalty = penalty)
+    } else if (ridge_applied) {
       cf <- qr.coef(qr(Xw), yw)      # lm.wfit can't take the penalty rows; ridge via augmented QR
       aliased <- which(is.na(cf))
       cf[aliased] <- 0
-      list(coef = cf, active = setdiff(seq_len(p), aliased), aliased = aliased)
+      list(coef = cf, active = setdiff(seq_len(p), aliased), aliased = aliased, penalty = penalty)
     } else {
       cf <- unname(stats::lm.wfit(X, response, w = w)$coefficients)
       aliased <- which(is.na(cf))
       cf[aliased] <- 0
-      list(coef = cf, active = setdiff(seq_len(p), aliased), aliased = aliased)
+      list(coef = cf, active = setdiff(seq_len(p), aliased), aliased = aliased, penalty = penalty)
     }
   }
 
@@ -528,30 +714,46 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
   Xw <- X * rw
   # condition number of the (weighted) design: large values (>~1e3) flag near-collinear templates
   # whose amplitudes are poorly separated (e.g. overlapping lines of different elements).
-  condition_number <- tryCatch(kappa(Xw, exact = FALSE), error = function(e) NA_real_)
+  # over the ELEMENT columns only -- the diagnostic is documented as element-template collinearity, and the
+  # broad background_/scatter-continuum columns would otherwise dominate kappa and mask the real overlaps.
+  condition_number <- tryCatch(kappa(Xw[, is_element_col, drop = FALSE], exact = FALSE),
+                               error = function(e) NA_real_)
   if (length(aliased) > 0) {
     warning("Deconvolution design matrix is rank-deficient; the following element templates are ",
             "aliased (not separable) and are reported as NA rather than 0: ",
             paste(elements[aliased], collapse = ", "), call. = FALSE)
   }
 
-  # ---- coefficient standard errors ---------------------------------------------------------------
-  # From the covariance of the estimable (active) coefficient set; clamped/aliased columns get NA.
+  # ---- coefficient standard errors + Laplace posterior covariance --------------------------------
+  # SEs and covariance from the estimable (active) coefficient set. The Laplace posterior covariance is
+  #   Sigma_a = sigma2 (Xa' W Xa + Lambda_a)^-1,
+  # with Lambda_a the per-column penalty Hessian returned by the solver (0 for unpenalised columns, so an
+  # unpenalised fit is byte-identical to before). Including the prior curvature makes each SE the shrinkage-
+  # consistent posterior SD of the (biased) penalised estimate, and the OFF-DIAGONAL terms carry the
+  # coefficient correlations that ratio / closure quantities need downstream (e.g. Compton normalization).
+  # Computed from R of the QR of the augmented [Xa; sqrt(Lambda_a)] (stable; the same design the fit solved).
+  # Clamped / aliased columns get NA. NOTE (NNLS): with non-negativity the inference conditions on the active,
+  # non-boundary set -- a standard approximation that ignores the inequality constraints; for the L1 prior the
+  # local L2-equivalent curvature is used (approximate, since the posterior is non-Gaussian at exactly 0).
   rank <- if (nonneg) length(active) else qr(Xw)$rank
   sigma2 <- sum(w * residuals^2) / max(n - length(active), 1)
-  coef_se <- rep(NA_real_, p)
-  names(coef_se) <- elements
+  coef_se <- rep(NA_real_, p); names(coef_se) <- elements
+  coef_cov <- matrix(0, p, p, dimnames = list(elements, elements))
+  penalty <- if (!is.null(final$penalty)) final$penalty else rep(0, p)
   if (length(active) > 0) {
-    Xa <- Xw[, active, drop = FALSE]
-    qra <- qr(Xa)
-    ra <- qra$rank
-    if (ra == ncol(Xa)) {
-      Ra <- qr.R(qra)
-      coef_se[active] <- sqrt(rowSums(backsolve(Ra, diag(ncol(Xa)))^2) * sigma2)
+    na_ <- length(active)
+    Xaug <- rbind(Xw[, active, drop = FALSE], diag(sqrt(pmax(penalty[active], 0)), na_, na_))
+    qra <- qr(Xaug); ra <- qra$rank
+    if (ra == na_) {
+      Rinv <- backsolve(qr.R(qra), diag(na_))
+      covP <- tcrossprod(Rinv) * sigma2          # covariance in the QR's (possibly pivoted) column order
+      piv <- qra$pivot
+      covA <- matrix(0, na_, na_); covA[piv, piv] <- covP   # unpermute to `active` column order
+      coef_cov[active, active] <- covA
+      coef_se[active] <- sqrt(pmax(diag(covA), 0))
     } else {
-      # rank-deficient active set: report SEs only for the estimable pivots, NA for the aliased
-      Ra <- qr.R(qra)[1:ra, 1:ra, drop = FALSE]
-      piv <- qra$pivot[1:ra]
+      # rank-deficient active set: estimable-pivot SEs only (diagonal), NA for the aliased
+      Ra <- qr.R(qra)[1:ra, 1:ra, drop = FALSE]; piv <- qra$pivot[1:ra]
       coef_se[active[piv]] <- sqrt(rowSums(backsolve(Ra, diag(ra))^2) * sigma2)
     }
   }
@@ -601,9 +803,19 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
     responses$height_se[aliased] <- NA_real_
   }
   tail_beta <- if (is.null(beta) || !is.finite(beta) || beta <= 0) responses$primary_sigma else beta
-  area_per_height <- responses$primary_sigma * sqrt(2 * pi) + if (tail != 0) tail * tail_beta else 0
+  # Exact area of the Hypermet exponential tail per unit height: the integral of
+  # tail*exp(d/beta)*erfc(d/(sqrt2 sigma) + sigma/(sqrt2 beta)) over d is tail * 2*beta*exp(-sigma^2/(2 beta^2)),
+  # NOT tail*beta -- the dropped 2*exp(-sigma^2/(2 beta^2)) factor depends on sigma (grows with line energy),
+  # so the old form biased peak_area energy-dependently (~18% for beta~sigma, up to ~2x for long tails).
+  tail_area <- if (tail != 0) tail * 2 * tail_beta * exp(-responses$primary_sigma^2 / (2 * tail_beta^2)) else 0
+  area_per_height <- responses$primary_sigma * sqrt(2 * pi) + tail_area
   responses$peak_area <- responses$height * area_per_height
   responses$peak_area_se <- responses$height_se * area_per_height
+
+  # peak-area covariance (a_i a_j Cov(coef_i, coef_j)): the correlated companion of peak_area_se, consumed by
+  # ratio / closure error propagation (e.g. xrf_compton_normalize). Element order matches `elements`.
+  area_cov <- outer(area_per_height, area_per_height) * coef_cov
+  dimnames(area_cov) <- list(elements, elements)
 
   structure(
     list(
@@ -618,7 +830,9 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
       ),
       response = df,
       components = components,
-      peaks = responses
+      peaks = responses,
+      coef_cov = coef_cov,
+      area_cov = area_cov
     ),
     class = "deconvolution_fit"
   )
@@ -722,12 +936,19 @@ xrf_lineshape <- function(energy_kev, mu = 0, sigma = 1, height = 1, tail = 0, s
 }
 
 # Fixed-amplitude coincidence (pile-up) model from a first-pass element fit. For the strongest lines,
-# the sum peak at E_i + E_j has a physically-fixed area: coincidence counts = 2*tau/T*A_i*A_j (i!=j)
-# or tau/T*A_i^2 (i==j), with T the live time; its width adds in quadrature (sqrt(sigma_i^2+sigma_j^2)).
+# the coincidence RATE is r_sum = 2*tau*R_i*R_j (i!=j) or tau*R_i^2 (i==j), with R the line count
+# RATE (cps). The response here is a cps spectrum, so peak_area = height*sigma*sqrt(2*pi) has units
+# cps*keV = R*dE (dE = channel width), i.e. R = peak_area/dE. The sum peak's own area (cps*keV) is
+# therefore r_sum*dE = 2*tau*A_i*A_j/dE (self: tau*A_i^2/dE) -- live time CANCELS in rate space; the
+# surviving normalizer is the energy channel width dE, not the live time. Width adds in quadrature.
 .xrf_pileup_model <- function(peaks, energy_kev, pileup_tau, livetime, energy_min_kev, energy_max_kev,
                               max_lines = 6L) {
   model <- numeric(length(energy_kev))
-  el <- peaks[!grepl("^(scatter|sum|pileup|escape)_", peaks$element) &
+  dE <- abs(stats::median(diff(energy_kev)))            # energy channel width (keV); abs() so a descending
+                                                        # grid does not give a negative dE (which silently
+                                                        # zeroed the pile-up); median approximates a non-uniform grid.
+  if (!is.finite(dE) || dE <= 0) return(list(model = model, peaks = .empty_pileup()))
+  el <- peaks[!grepl("^(scatter|sum|pileup|escape|background)_", peaks$element) &
                 is.finite(peaks$peak_area) & peaks$peak_area > 0 &
                 is.finite(peaks$primary_energy_kev) & is.finite(peaks$primary_sigma), , drop = FALSE]
   if (nrow(el) == 0) return(list(model = model, peaks = .empty_pileup()))
@@ -739,7 +960,7 @@ xrf_lineshape <- function(energy_kev, mu = 0, sigma = 1, height = 1, tail = 0, s
   for (i in seq_len(k)) for (j in i:k) {
     e_sum <- el$primary_energy_kev[i] + el$primary_energy_kev[j]
     if (!is.finite(e_sum) || e_sum < energy_min_kev || e_sum > energy_max_kev) next
-    area <- (if (i == j) 1 else 2) * (pileup_tau / livetime) * el$peak_area[i] * el$peak_area[j]
+    area <- (if (i == j) 1 else 2) * pileup_tau * el$peak_area[i] * el$peak_area[j] / dE
     if (!is.finite(area) || area <= 0) next
     s_sum <- sqrt(el$primary_sigma[i]^2 + el$primary_sigma[j]^2)
     height <- area / (s_sum * sqrt(2 * pi))

@@ -38,7 +38,19 @@ xrf_add_smooth_filter <- function(.spectra, .values = .data$.spectra$cps,
 #'
 #'
 xrf_filter_pyramid <- function(width = 7) {
-  stopifnot(length(width) == 1, width >= 1, (width %% 2) != 0)
+  stopifnot(is.numeric(width), length(width) == 1, is.finite(width), width >= 1)
+  # Match xrf_filter_gaussian: the kernel needs an odd, integer number of taps. The old guard
+  # `(width %% 2) != 0` was fooled by non-integers (e.g. 20.327 %% 2 = 0.327 != 0 passes, then
+  # `%/% 2` silently floors to a wrong-length kernel). Coerce to the nearest odd integer and warn, so a
+  # caller optimizing width over a continuous range cannot silently mis-size the filter. `width == 1` is a
+  # legitimate identity (no smoothing); anything >= 2 coerces to the nearest odd >= 3 (a request to smooth
+  # must not collapse to the identity -- e.g. width = 2 previously rounded to 1, a silent no-op).
+  width_odd <- if (width < 2) 1 else max(3, 2 * round((width - 1) / 2) + 1)
+  if (!isTRUE(width == width_odd)) {
+    warning("xrf_filter_pyramid(): 'width' must be an odd integer >= 1; coercing ",
+            width, " to ", width_odd, ".", call. = FALSE)
+    width <- width_odd
+  }
   if(width == 1) return(1)
   mid <- width %/% 2
   f <- c(

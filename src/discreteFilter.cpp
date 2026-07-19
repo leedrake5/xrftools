@@ -58,12 +58,18 @@ NumericVector discreteFilterIterative(NumericVector x, NumericVector f, int iter
     checkUserInterrupt();
 
     outNext = discreteFilter(out, f, true, true);
-    // Convergence metric: RMS of the per-channel change. The previous signed mean
-    // (sum(outNext - out) / n) is ~0 for an area-preserving smoother regardless of how much the
-    // shape still changes, so any positive epsilon tripped on the first iteration. RMS is >= 0 and
-    // only small once the iteration has actually converged.
+    // Convergence metric: RELATIVE RMS of the per-channel change. The signed mean (sum(outNext-out)/n)
+    // is ~0 for an area-preserving smoother regardless of remaining shape change; a bare RMS is >= 0 but
+    // scales with the signal amplitude, so the same epsilon means different things on counts vs cps vs a
+    // longer acquisition. Normalise by the signal VARIATION (standard deviation, i.e. RMS about the mean),
+    // NOT the absolute RMS -- the latter is inflated by a large DC pedestal (a high baseline), which would
+    // shrink the relative change and stop the smoother prematurely. This makes epsilon a dimensionless
+    // fractional tolerance that behaves the same regardless of count scale AND pedestal level.
     NumericVector d = outNext - out;
-    rmsChange = sqrt(sum(d * d) / n);
+    double rms = sqrt(sum(d * d) / n);
+    double mu = sum(outNext) / n;
+    double scale = sqrt(sum((outNext - mu) * (outNext - mu)) / n);
+    rmsChange = rms / (scale + 1e-12);
     out = outNext;
     if((epsilon > 0) && (rmsChange < epsilon)) {
       break;

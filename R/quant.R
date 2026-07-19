@@ -70,19 +70,50 @@
   mu
 }
 
-# Warn if a calibration vector was fitted with different observed-mass settings than are in use.
-.xrf_check_calibration_settings <- function(calibration, self_absorption, matrix, normalization) {
+# Warn if a calibration vector was fitted with different settings than are in use. Every stamped setting
+# is compared, because the per-element sensitivity S_i (hence the absolute calibration scale) depends not
+# only on self_absorption/matrix/normalization but also on beam_energy_kev, detector_type, efficiency,
+# excitation(_weighting), coster_kronig and the tube -- a mismatch in any of those silently corrupts the
+# absolute values. `current` is a named list of the settings in use.
+.xrf_check_calibration_settings <- function(calibration, current) {
   st <- attr(calibration, "settings")
   if (is.null(st)) return(invisible())
   bad <- character(0)
-  if (!identical(st$self_absorption, self_absorption)) bad <- c(bad, "self_absorption")
-  if (!identical(st$normalization, normalization)) bad <- c(bad, "normalization")
-  if (self_absorption == "generalized" && !isTRUE(all.equal(st$matrix, matrix))) bad <- c(bad, "matrix")
+  for (k in intersect(names(st), names(current))) {
+    # `matrix` only affects the result under generalized self-absorption
+    if (k == "matrix" && !identical(current$self_absorption, "generalized")) next
+    same <- isTRUE(tryCatch(all.equal(st[[k]], current[[k]]), error = function(e) FALSE)) ||
+      identical(st[[k]], current[[k]])
+    if (!same) bad <- c(bad, k)
+  }
   if (length(bad) > 0) {
     warning("calibration was fitted with different ", paste(bad, collapse = ", "),
             " settings than used here; the absolute values will be wrong -- match them.", call. = FALSE)
   }
   invisible()
+}
+
+# Compact, comparable snapshot of the settings that determine the FP sensitivity scale (stamped on a
+# calibration vector and rebuilt on the unknowns for .xrf_check_calibration_settings).
+.xrf_calibration_settings <- function(self_absorption, matrix, normalization, beam_energy_kev,
+                                      detector_type, efficiency, excitation, excitation_weighting,
+                                      coster_kronig, tube) {
+  list(self_absorption = self_absorption, matrix = matrix, normalization = normalization,
+       beam_energy_kev = beam_energy_kev, detector_type = detector_type, efficiency = efficiency,
+       excitation = excitation, excitation_weighting = excitation_weighting, coster_kronig = coster_kronig,
+       tube = if (is.null(tube)) NULL else list(anode = tube$anode, kv = tube$kv))
+}
+
+# Resolve a sensitivity relative-uncertainty spec (a scalar applied to all elements, or a named per-element
+# numeric vector) to a per-element vector aligned with `elements`. Unnamed / missing entries and non-finite or
+# negative values become 0 (no systematic contribution). Used to fold the FP-sensitivity SYSTEMATIC error into
+# concentration_se / observed_mass_se, in quadrature with the statistical peak-area error.
+.xrf_resolve_rel_se <- function(x, elements) {
+  if (is.null(x)) return(rep(0, length(elements)))
+  v <- if (!is.null(names(x))) suppressWarnings(as.numeric(x[elements]))
+       else rep(suppressWarnings(as.numeric(x))[1], length(elements))
+  v[!is.finite(v) | v < 0] <- 0
+  v
 }
 
 #' Compton-normalize deconvolution peak areas
@@ -106,19 +137,45 @@ xrf_compton_normalize <- function(object, by = c("compton", "rayleigh", "scatter
   peaks <- if (inherits(object, "deconvolution_fit")) object$peaks else object
   stopifnot("element" %in% colnames(peaks), "peak_area" %in% colnames(peaks))
 
-  comp <- switch(
+  # match BOTH the anode-line scatter (scatter_compton) AND the scattered-continuum pseudo-elements
+  # (scatter_compton_continuum) via a prefix pattern -- the continuum carries most of the incoherent
+  # scattering power, so omitting it (as an exact "scatter_compton" match did) understates the normalizer
+  # whenever scatter_continuum = TRUE.
+  pat <- switch(
     by,
-    compton  = "scatter_compton",
-    rayleigh = "scatter_rayleigh",
-    scatter  = c("scatter_compton", "scatter_rayleigh")
+    compton  = "^scatter_compton",
+    rayleigh = "^scatter_rayleigh",
+    scatter  = "^scatter_(compton|rayleigh)"
   )
-  denom <- sum(peaks$peak_area[peaks$element %in% comp], na.rm = TRUE)
+  denom <- sum(peaks$peak_area[grepl(pat, peaks$element)], na.rm = TRUE)
   if (!is.finite(denom) || denom <= 0) {
     stop("No positive ", by, " scatter area found; run the deconvolution with a `tube` so scatter ",
          "templates are fitted.")
   }
   peaks$peak_area_norm <- peaks$peak_area / denom
-  if ("peak_area_se" %in% colnames(peaks)) peaks$peak_area_norm_se <- peaks$peak_area_se / denom
+  if ("peak_area_se" %in% colnames(peaks)) {
+    scat <- grepl(pat, peaks$element)
+    # Ratio-error propagation for X/Y = area_i / denom, denom = sum of the scatter areas:
+    #   Var(X/Y) = Var(X)/Y^2 + X^2 Var(Y)/Y^4 - 2 X Cov(X,Y)/Y^3.
+    # When the fit's peak-area COVARIANCE is available (a deconvolution_fit's area_cov, from the Laplace
+    # posterior) the denominator variance uses the true correlated sum and the element/denominator covariance
+    # Cov(area_i, denom) is included; otherwise denom_se falls back to a quadrature sum (independence) and the
+    # Cov(X,Y) term is dropped -- the standard marginal-SE approximation.
+    acov <- if (inherits(object, "deconvolution_fit")) object$area_cov else NULL
+    if (!is.null(acov) && all(peaks$element %in% rownames(acov))) {
+      els <- peaks$element; sc <- els[scat]
+      denom_var <- sum(acov[sc, sc, drop = FALSE])
+      cov_i_denom <- rowSums(acov[els, sc, drop = FALSE])
+      var_norm <- (peaks$peak_area_se / denom)^2 +
+        peaks$peak_area^2 * denom_var / denom^4 -
+        2 * peaks$peak_area * cov_i_denom / denom^3
+      peaks$peak_area_norm_se <- sqrt(pmax(var_norm, 0))
+    } else {
+      denom_se <- sqrt(sum(peaks$peak_area_se[scat]^2, na.rm = TRUE))
+      peaks$peak_area_norm_se <- sqrt((peaks$peak_area_se / denom)^2 +
+                                        (peaks$peak_area * denom_se / denom^2)^2)
+    }
+  }
   peaks
 }
 
@@ -161,7 +218,8 @@ xrf_fp_sensitivity <- function(elements, beam_energy_kev, detector_type = NULL,
   if (poly) {
     grid <- seq(0.1, tube$kv * 0.999, length.out = 400L)
     de <- grid[2] - grid[1]
-    n_tube <- xrf_tube_spectrum(tube, grid)
+    n_cont <- xrf_tube_spectrum(tube, grid, char_peak_ratio = 0)      # smooth continuum (grid integration)
+    char <- xrf_tube_spectrum(tube, grid, discrete_lines = TRUE)      # anode lines (integrated flux, discrete)
   }
 
   purrr::map_dfr(elements, function(el) {
@@ -170,10 +228,30 @@ xrf_fp_sensitivity <- function(elements, beam_energy_kev, detector_type = NULL,
       return(tibble::tibble(element = el, primary_energy_kev = NA_real_, sensitivity = NA_real_))
     }
     rel <- if (poly) {
-      excit <- vapply(lines$edge, function(sh) {
+      # excitation integral = continuum on the grid + the anode characteristic lines added ANALYTICALLY at
+      # their exact energies (sigma(E_line) * line_flux), instead of sampling 0.03-keV lines on the ~0.1-keV
+      # grid -- which under-integrated them with up to ~33% grid-phase jitter (worse after the B2/B3 harder
+      # continuum). Removes the ~10-14% FP-sensitivity bias for elements excited mainly by an anode line.
+      ex_shell <- function(sh) {
         s <- xrf_photoionization_cross_section(el, sh, grid); s[!is.finite(s)] <- 0
-        sum(s * n_tube) * de
-      }, numeric(1))
+        val <- sum(s * n_cont) * de
+        if (nrow(char)) {
+          sl <- xrf_photoionization_cross_section(el, sh, char$energy_kev); sl[!is.finite(sl)] <- 0
+          val <- val + sum(sl * char$flux)
+        }
+        val
+      }
+      excit <- vapply(lines$edge, ex_shell, numeric(1))
+      # Coster-Kronig L-subshell cascade (mirrors the mono xrf_relative_peak_intensity path, which the
+      # poly branch previously bypassed -- so the coster_kronig argument had no effect under a tube and
+      # heavy-element L-line sensitivities were under-counted). Redistribute the tube-integrated L1/L2
+      # vacancy production down to L3 before radiative decay; non-L rows are unchanged.
+      if (coster_kronig) {
+        nrw <- length(lines$edge)
+        excit <- .xrf_ck_cascade(rep(el, nrw), lines$edge, excit,
+                                 rep(ex_shell("L1"), nrw), rep(ex_shell("L2"), nrw),
+                                 rep(ex_shell("L3"), nrw))
+      }
       excit * xrf_transition_probability(el, lines$trans)   # omega * branching (from emission prob)
     } else {
       xrf_relative_peak_intensity(el, lines$edge, lines$trans, beam_energy_kev,
@@ -181,10 +259,13 @@ xrf_fp_sensitivity <- function(elements, beam_energy_kev, detector_type = NULL,
                                   coster_kronig = coster_kronig, excitation = excitation)
     }
     eff <- if (efficiency) {
+      # full_energy_peak = TRUE: the sensitivity must predict the measured PHOTOPEAK area, so remove the
+      # detector-escape fraction (1 - f_escape). Matters for Ge/CdTe near their K edges (~10-14%).
       xrf_detector_efficiency(lines$energy_kev, detector_type = detector_type,
                               active_thickness_um = active_thickness_um,
                               be_window_um = be_window_um, dead_layer_um = dead_layer_um,
-                              air_path_cm = air_path_cm, atmosphere = atmosphere, window = window)
+                              air_path_cm = air_path_cm, atmosphere = atmosphere, window = window,
+                              full_energy_peak = TRUE)
     } else {
       rep(1, nrow(lines))
     }
@@ -222,7 +303,12 @@ xrf_fp_sensitivity <- function(elements, beam_energy_kev, detector_type = NULL,
 #' @param secondary_fluorescence Add secondary (enhancement) fluorescence?
 #' @param tertiary_fluorescence Add third-order (k -> j -> i chain) enhancement fluorescence
 #'   (implies \code{secondary_fluorescence}). Usually a small (<~1-2\%) correction.
-#' @param incidence_deg,takeoff_deg Beam incidence / detector take-off angles (degrees).
+#' @param incidence_deg,takeoff_deg Beam incidence / detector take-off angles (degrees) for the
+#'   self-absorption path lengths. These are passed as plain scalars -- \code{xrf_quantify} does not read an
+#'   \link{xrf_geometry} object (whose \code{scatter_angle_deg}, used for the Compton shift in the
+#'   deconvolution, is a separate quantity); set them to match your instrument, consistently with the
+#'   \code{scatter_angle_deg} you used for scatter (a common convention is
+#'   \eqn{scatter\_angle \approx 180 - incidence - takeoff}).
 #' @param dark_matrix Optional named vector of mass fractions of unmeasured matrix elements (e.g.
 #'   \code{c(O = 0.47)}) included in the absorption but not quantified.
 #' @param oxide Oxide stoichiometry for oxygen-by-difference. \code{FALSE} (default) makes no oxide
@@ -233,10 +319,23 @@ xrf_fp_sensitivity <- function(elements, beam_energy_kev, detector_type = NULL,
 #'   added to the absorbing matrix, and reported as an \code{"O"} row.
 #' @param total Concentrations are scaled to sum to this (1 for mass fraction, 100 for percent).
 #' @param iterations Self-absorption iterations.
+#' @param areal_density Sample areal density \eqn{\rho d} (g/cm^2) for a finite-thickness (thin-film /
+#'   coating) self-absorption correction. Default \code{Inf} is an infinitely-thick homogeneous sample
+#'   (the emitted intensity saturates, kernel \eqn{1/A}); a finite value uses \eqn{(1-e^{-A\rho d})/A}
+#'   with \eqn{A=\mu_s(E_0)/\sin\psi_{in}+\mu_s(E_i)/\sin\psi_{out}}, so a thin layer self-absorbs less
+#'   (\eqn{\to \rho d} as \eqn{\rho d \to 0}). Applies to both the monochromatic and polychromatic paths.
 #'
+#' @param sensitivity_rel_se Optional relative 1-sigma uncertainty on the FP sensitivity \eqn{S_i} (the
+#'   SYSTEMATIC error from the atomic constants -- fluorescence yields, cross sections, Coster-Kronig; e.g.
+#'   PTB reference-free fundamental-parameter values). A scalar applies to all elements; a named numeric
+#'   vector is per element (unnamed get 0). Folded in quadrature with the statistical peak-area error into
+#'   \code{concentration_se} / \code{observed_mass_se}. Default 0 (statistical error only).
 #' @return A tibble with \code{element}, \code{primary_energy_kev}, \code{peak_area},
-#'   \code{sensitivity}, \code{concentration} (normalized, closed to \code{total}), and
-#'   \code{observed_mass} (un-normalized, matrix-corrected \eqn{A_i/(S_i\,\cdot\,\mathrm{selfabs}\,\cdot\,(1+\mathrm{enh}))}).
+#'   \code{sensitivity}, \code{concentration} (normalized, closed to \code{total}),
+#'   \code{observed_mass} (un-normalized, matrix-corrected \eqn{A_i/(S_i\,\cdot\,\mathrm{selfabs}\,\cdot\,(1+\mathrm{enh}))}),
+#'   and their standard errors \code{concentration_se}/\code{observed_mass_se} (first-order, propagated from
+#'   the fit's \code{peak_area_se}: the relative area error times the value; \code{NA} when the fit could not
+#'   estimate the area error, and treating the FP model factors + the closure sum as known).
 #' @export
 #'
 xrf_quantify <- function(object, beam_energy_kev, detector_type = NULL,
@@ -247,7 +346,8 @@ xrf_quantify <- function(object, beam_energy_kev, detector_type = NULL,
                          excitation_weighting = c("cross_section", "jump"), coster_kronig = TRUE,
                          tube = NULL, self_absorption = TRUE, secondary_fluorescence = FALSE,
                          tertiary_fluorescence = FALSE, incidence_deg = 45, takeoff_deg = 45,
-                         dark_matrix = NULL, oxide = FALSE, total = 1, iterations = 12) {
+                         dark_matrix = NULL, oxide = FALSE, total = 1, iterations = 12,
+                         areal_density = Inf, sensitivity_rel_se = 0) {
   if (isTRUE(tertiary_fluorescence)) secondary_fluorescence <- TRUE   # tertiary implies secondary
   peaks <- if (inherits(object, "deconvolution_fit")) object$peaks else object
   stopifnot("element" %in% colnames(peaks), "peak_area" %in% colnames(peaks))
@@ -294,6 +394,12 @@ xrf_quantify <- function(object, beam_energy_kev, detector_type = NULL,
   conc <- renorm(raw)
 
   if (isTRUE(self_absorption) || isTRUE(secondary_fluorescence)) {
+    if (match.arg(excitation) == "electron") {
+      warning("xrf_quantify: the self-absorption and secondary-fluorescence corrections use the PHOTON ",
+              "matrix model (X-ray path-length self-absorption + Shiraiwa-Fujino enhancement). For electron ",
+              "excitation this is NOT a ZAF / phi-rho-z correction (no atomic-number/stopping-power/",
+              "backscatter terms), so electron-mode concentrations are approximate.", call. = FALSE)
+    }
     sin_in <- sin(incidence_deg * pi / 180)
     sin_out <- sin(takeoff_deg * pi / 180)
     Ei <- q$primary_energy_kev
@@ -318,20 +424,80 @@ xrf_quantify <- function(object, beam_energy_kev, detector_type = NULL,
       if (!is.null(muDM_tab)) m <- m + sum(dm_frac * muDM_tab[, k])
       m
     }
+
+    # ---- W1/W10: polychromatic excitation grid (tube spectrum + per-element production) -----------
+    # For a tube (polychromatic) source both the primary self-absorption (W1) and the secondary-
+    # fluorescence exciter production (W10) belong under an excitation integral over the tube spectrum
+    # N(E), not evaluated once at the endpoint kV. Precompute (composition-independent) the tube
+    # spectrum, each element's primary-shell production on the grid, and the bare production integral
+    # `excit_bare` = integral N(E) sigma_i(E) dE (reduces to sigma_i(E0) for a monochromatic source).
+    poly <- !is.null(tube) && inherits(tube, "xrf_tube") && match.arg(excitation) == "photon"
+    poly_selfabs <- isTRUE(self_absorption) && poly
+    need_grid <- poly && (isTRUE(self_absorption) || isTRUE(secondary_fluorescence))
+    if (need_grid) {
+      grid <- seq(0.1, tube$kv * 0.999, length.out = 400L)
+      dgrid <- grid[2] - grid[1]
+      N_grid <- xrf_tube_spectrum(tube, grid)
+      # per-element primary-shell production on the grid (composition-independent; same CK basis as S_i)
+      P_grid <- vapply(seq_along(els), function(i)
+        .xrf_shell_production(els[i], q$primary_shell[i], grid, coster_kronig = isTRUE(coster_kronig)),
+        numeric(length(grid)))                                   # [n_grid x n_els]
+      if (!is.matrix(P_grid)) P_grid <- matrix(P_grid, ncol = length(els))
+      wgt_grid <- P_grid * N_grid                                # excitation weight N(E) * sigma_i(E)
+      excit_bare <- colSums(wgt_grid) * dgrid                    # bare (no-absorption) integral per element
+      excit_bare[!is.finite(excit_bare) | excit_bare <= 0] <- NA_real_
+    }
+    if (poly_selfabs) {
+      # per-element TOTAL mu on the grid (composition-independent): mu_s(grid) = mu_grid_el %*% conc (+ O + dark)
+      mu_grid_el <- vapply(els, function(el) .xrf_element_total_mu(el, grid), numeric(length(grid)))  # [n_grid x n_els]
+      if (!is.matrix(mu_grid_el)) mu_grid_el <- matrix(mu_grid_el, ncol = length(els))
+      muO_grid  <- if (any(r > 0)) .xrf_element_total_mu("O", grid) else NULL
+      muDM_grid <- if (length(dm_el)) vapply(dm_el, function(el) .xrf_element_total_mu(el, grid), numeric(length(grid))) else NULL
+      if (!is.null(muDM_grid) && !is.matrix(muDM_grid)) muDM_grid <- matrix(muDM_grid, ncol = length(dm_el))
+    }
+
     # precompute the (concentration-independent) atomic factors for secondary fluorescence
     if (isTRUE(secondary_fluorescence)) {
       omega_j <- xrf_fluorescence_yield(els, q$primary_shell)
       edge_i <- q$primary_edge_kev
-      tau_E0 <- vapply(els, function(el) .xrf_element_pe_mu(el, beam_energy_kev), numeric(1))
-      # tau_ij[i, j] = photoelectric absorption of element i at element j's line energy
-      tau_ij <- outer(seq_along(els), seq_along(els),
-                      Vectorize(function(a, b) .xrf_element_pe_mu(els[a], Ei[b])))
+      # Exciter/absorber production uses the SHELL-PARTIAL photoionization cross section (with the CK
+      # L-cascade) -- the SAME production basis as the primary sensitivity S_i -- not the total
+      # photoelectric mu. Total mu counts vacancies in shells that do not emit the observed line, which
+      # over-counts the enhancement (~13% for K exciters, several-fold for L-line/heavy exciters).
+      # secondary fluorescence is a photon (photoionization) process regardless of the primary
+      # excitation mode, so the CK L-cascade follows coster_kronig directly.
+      ck <- isTRUE(coster_kronig)
+      tau_E0 <- .xrf_shell_production(els, q$primary_shell, beam_energy_kev, coster_kronig = ck)
+      # tau_ij[i, j] = shell-partial production of element i (its primary shell) at element j's line energy
+      tau_ij <- vapply(seq_along(els), function(j)
+        .xrf_shell_production(els, q$primary_shell, Ei[j], coster_kronig = ck), numeric(length(els)))
+      if (!is.matrix(tau_ij)) tau_ij <- matrix(tau_ij, nrow = length(els))    # length(els)==1 guard
     }
 
+    # E4: finite-thickness self-absorption kernel. For a homogeneous layer of areal density
+    # m = rho*d (g/cm^2), the emitted intensity saturates as (1 - exp(-A*m))/A instead of the thick-sample
+    # 1/A, where A = mu_s(E)/sin_in + mu_s(E_i)/sin_out. areal_density = Inf (default) recovers 1/A exactly
+    # (thick sample); a finite value models a thin film / coating (-> m as m -> 0, no self-absorption).
+    fin_abs <- function(A) {
+      if (is.finite(areal_density)) (1 - exp(-A * areal_density)) / A else 1 / A
+    }
     for (iter in seq_len(iterations)) {
       mu_e0 <- mu_at(1L)
       mu_ei <- vapply(seq_along(Ei), function(i) mu_at(i + 1L), numeric(1))
-      m_corr <- if (isTRUE(self_absorption)) 1 / (mu_e0 / sin_in + mu_ei / sin_out) else 1
+      if (!isTRUE(self_absorption)) {
+        m_corr <- 1
+      } else if (poly_selfabs) {
+        # incident-leg absorption folded across the tube spectrum (W1); emergent leg fixed at E_i
+        mu_s_grid <- as.vector(mu_grid_el %*% conc)
+        o_c <- sum(conc * r); if (o_c > 0 && !is.null(muO_grid)) mu_s_grid <- mu_s_grid + o_c * muO_grid
+        if (!is.null(muDM_grid)) mu_s_grid <- mu_s_grid + as.vector(muDM_grid %*% dm_frac)
+        m_corr <- vapply(seq_along(els), function(i) {
+          if (!is.finite(excit_bare[i])) return(fin_abs(mu_e0 / sin_in + mu_ei[i] / sin_out))  # fallback
+          sum(wgt_grid[, i] * fin_abs(mu_s_grid / sin_in + mu_ei[i] / sin_out)) * dgrid / excit_bare[i]
+        }, numeric(1))
+      } else {
+        m_corr <- fin_abs(mu_e0 / sin_in + mu_ei / sin_out)                                 # monochromatic (exact)
+      }
 
       # Secondary/tertiary (enhancement) fluorescence, Shiraiwa-Fujino. B[i, j] is the enhancement of
       # element i per unit mass of element j (element j's line must clear i's edge). Secondary
@@ -340,13 +506,46 @@ xrf_quantify <- function(object, beam_energy_kev, detector_type = NULL,
       enh <- rep(0, length(els))
       if (isTRUE(secondary_fluorescence)) {
         B <- matrix(0, length(els), length(els))
+        # W12: polychromatic g-factor INCIDENT leg. The incident term (primary beam penetrating to create
+        # exciter j) is folded across the tube spectrum, weighted by exciter j's OWN excitation
+        # N(E)*sigma_j(E) = wgt_grid[, j], instead of the single endpoint mu_e0 -- consistent with the W1
+        # self-absorption integral above. The endpoint energy has the SMALLEST mu -> deepest penetration ->
+        # LARGEST g, so the monochromatic mu_e0 systematically OVER-estimates the enhancement (measured
+        # ~132% Fe->Cr for dilute Cr in near-pure Fe vs a ~20-60% expectation / <=22% empirical bound); the
+        # excitation-weighted effective mu is larger (mid-spectrum-dominated), giving the physical, shallower
+        # enhancement. Precomputed per exciter j; falls back to the endpoint form for a monochromatic source
+        # or a missing grid.
+        poly_g <- isTRUE(poly) && !is.null(wgt_grid) && is.numeric(dgrid)
+        if (poly_g) {
+          mu_s_grid2 <- as.vector(mu_grid_el %*% conc)
+          o_c2 <- sum(conc * r); if (o_c2 > 0 && !is.null(muO_grid)) mu_s_grid2 <- mu_s_grid2 + o_c2 * muO_grid
+          if (!is.null(muDM_grid)) mu_s_grid2 <- mu_s_grid2 + as.vector(muDM_grid %*% dm_frac)
+        }
+        inc_leg <- vapply(seq_along(els), function(j) {
+          muj <- mu_ei[j]
+          if (poly_g && is.finite(excit_bare[j]) && excit_bare[j] > 0)
+            sum(wgt_grid[, j] * (sin_in / mu_s_grid2) * log(1 + mu_s_grid2 / (sin_in * muj))) * dgrid / excit_bare[j]
+          else (sin_in / mu_e0) * log(1 + mu_e0 / (sin_in * muj))
+        }, numeric(1))
         for (i in seq_along(els)) {
           for (j in seq_along(els)) {
             if (j == i || !is.finite(Ei[j]) || Ei[j] <= edge_i[i]) next
             muj <- mu_ei[j]                       # sample attenuation at j's line energy
-            g <- 0.5 * muj * ((sin_in / mu_e0) * log(1 + mu_e0 / (sin_in * muj)) +
+            g <- 0.5 * muj * (inc_leg[j] +
                                 (sin_out / mu_ei[i]) * log(1 + mu_ei[i] / (sin_out * muj)))
-            B[i, j] <- omega_j[j] * (tau_E0[j] / tau_E0[i]) * (tau_ij[i, j] / muj) * g
+            # W10: under a tube, weight the enhancer/primary production ratio by the polychromatic
+            # excitation integral (integral N(E) sigma(E) dE) instead of the single endpoint energy, so a
+            # low-Z exciter excited across the whole spectrum is not undercounted relative to a heavy
+            # exciter only reachable near the endpoint. Reduces to the monochromatic sigma_j(E0)/sigma_i(E0)
+            # when N -> delta. (The g-factor incident term still uses the endpoint mu_e0 -- a bounded,
+            # second-order residual, since (sin_in/mu_e0) ln(1 + mu_e0/(sin_in muj)) -> 1/muj as mu_e0 -> 0.)
+            prod_ratio <- if (poly && is.finite(excit_bare[j]) && is.finite(excit_bare[i]) &&
+                              excit_bare[i] > 0) {
+              excit_bare[j] / excit_bare[i]
+            } else {
+              tau_E0[j] / tau_E0[i]
+            }
+            B[i, j] <- omega_j[j] * prod_ratio * (tau_ij[i, j] / muj) * g
           }
         }
         enh2 <- as.vector(B %*% conc)
@@ -364,12 +563,24 @@ xrf_quantify <- function(object, beam_energy_kev, detector_type = NULL,
   # the others' total -- it moves only through the real matrix corrections (self-absorption + secondary/
   # tertiary fluorescence). This is what the CloudCal "full-fidelity" $Mass reports.
   q$observed_mass <- raw
+  # Fit-uncertainty propagation (first order, area-dominated): the FP model factors (S_i, self-absorption
+  # m_corr, enhancement) are treated as known, so the RELATIVE error of the fitted peak area carries through
+  # to both observed_mass and concentration. concentration_se additionally ignores the covariance introduced
+  # by the sum-to-`total` closure (a second-order term when the sum is dominated by well-determined majors).
+  rel_se <- if ("peak_area_se" %in% names(q)) q$peak_area_se / q$peak_area else rep(NA_real_, nrow(q))
+  # Fold the SYSTEMATIC FP-sensitivity relative uncertainty (sensitivity_rel_se: the 1-sigma on S_i from the
+  # atomic constants -- yields / cross sections / CK, e.g. PTB reference-free FP values; 0 = off) in quadrature
+  # with the statistical area error, so concentration_se / observed_mass_se report the total uncertainty.
+  rel_se <- sqrt(rel_se^2 + .xrf_resolve_rel_se(sensitivity_rel_se, q$element)^2)
+  q$observed_mass_se <- raw * rel_se
+  q$concentration_se <- conc * rel_se
   out <- tibble::as_tibble(q[, c("element", "primary_energy_kev", "peak_area", "sensitivity",
-                                 "concentration", "observed_mass")])
+                                 "concentration", "concentration_se", "observed_mass", "observed_mass_se")])
   if (oxide_on && any(r > 0)) {   # report the stoichiometric oxygen
     out <- dplyr::bind_rows(out, tibble::tibble(
       element = "O", primary_energy_kev = NA_real_, peak_area = NA_real_,
-      sensitivity = NA_real_, concentration = sum(conc * r), observed_mass = NA_real_
+      sensitivity = NA_real_, concentration = sum(conc * r), concentration_se = NA_real_,
+      observed_mass = NA_real_, observed_mass_se = NA_real_
     ))
   }
   out
@@ -409,6 +620,11 @@ xrf_quantify <- function(object, beam_energy_kev, detector_type = NULL,
 #' elements just below a strong exciter (e.g. Cr/V/Ti/Ca under strong Fe K\eqn{\alpha} in Fe-rich
 #' rocks) read high and track the exciter -- use \link{xrf_quantify} when enhancement matters. (3) It
 #' assumes a thick, homogeneous sample (thin films / coatings / heterogeneous samples violate this).
+#' (4) For a counts-per-channel spectrum \code{peak_area} (and hence \code{observed_mass}) scales with the
+#' energy-axis channel width (\code{observed_mass} \eqn{\propto} rate \eqn{\times} \eqn{\Delta E}), so it is
+#' \strong{not comparable across MCAs of different gain} -- calibrate (\link{xrf_calibrate}) at the same
+#' channel width/gain you will apply, exactly as for the other settings. (This cancels in \link{xrf_quantify}'s
+#' normalized \code{concentration}, which closes to a fixed sum, so only the un-normalized value is affected.)
 #'
 #' @param object A \code{deconvolution_fit} or its \code{peaks} data frame (needs \code{element},
 #'   \code{peak_area}; scatter pseudo-elements are used for \code{normalization} and then dropped).
@@ -432,8 +648,15 @@ xrf_quantify <- function(object, beam_energy_kev, detector_type = NULL,
 #'   \link{xrf_calibrate}) to scale the relative values to absolute mass. Must have been fitted with
 #'   the same \code{self_absorption}/\code{matrix}/\code{normalization} settings.
 #'
+#' @param sensitivity_rel_se Optional relative 1-sigma uncertainty on the FP sensitivity \eqn{S_i} (SYSTEMATIC,
+#'   from the atomic constants; e.g. PTB reference-free fundamental-parameter values). A scalar applies to all
+#'   elements; a named numeric vector is per element (unnamed get 0). Folded in quadrature with the statistical
+#'   peak-area error into \code{observed_mass_se}. Default 0 (statistical error only).
 #' @return A tibble with \code{element}, \code{primary_energy_kev}, \code{peak_area},
-#'   \code{sensitivity} and \code{observed_mass} (un-normalized; the sum is diagnostic, not forced).
+#'   \code{sensitivity}, \code{observed_mass} (un-normalized; the sum is diagnostic, not forced), and
+#'   \code{observed_mass_se} (first-order standard error propagated from the fit's \code{peak_area_se} as the
+#'   relative area error times \code{observed_mass}; \code{NA} when unavailable, and treating the sensitivity /
+#'   matrix / normalization / calibration factors as known).
 #' @export
 #'
 xrf_observed_mass <- function(object, beam_energy_kev, detector_type = NULL, be_window_um = NULL,
@@ -445,7 +668,7 @@ xrf_observed_mass <- function(object, beam_energy_kev, detector_type = NULL, be_
                               self_absorption = c("none", "generalized"), matrix = "silicate",
                               incidence_deg = 45, takeoff_deg = 45,
                               normalization = c("none", "compton", "rayleigh", "scatter"),
-                              calibration = NULL) {
+                              calibration = NULL, sensitivity_rel_se = 0) {
   normalization <- match.arg(normalization)
   self_absorption <- match.arg(self_absorption)
   peaks <- if (inherits(object, "deconvolution_fit")) object$peaks else object
@@ -467,6 +690,13 @@ xrf_observed_mass <- function(object, beam_energy_kev, detector_type = NULL, be_
   q$sensitivity <- s$sensitivity
 
   obs <- q$peak_area / q$sensitivity                 # matrix-free observed areal mass (relative)
+  # Fit-uncertainty propagation (first order, area-dominated): the FP sensitivity and the matrix /
+  # normalization / calibration factors are treated as known, so the RELATIVE error of the fitted peak
+  # area carries straight through to observed_mass. peak_area_se comes from the deconvolution (NA where the
+  # fit could not estimate it, e.g. NNLS-clamped or aliased columns). The scatter-normalizer denominator's
+  # uncertainty IS folded in below (when normalization is used); the calibration-factor uncertainty is not
+  # (a plain calibration vector carries no SE).
+  rel_se <- if ("peak_area_se" %in% names(q)) q$peak_area_se / q$peak_area else rep(NA_real_, nrow(q))
 
   if (self_absorption == "generalized") {            # remove per-element depth via a generic matrix
     comp <- .xrf_resolve_matrix(matrix)
@@ -477,21 +707,28 @@ xrf_observed_mass <- function(object, beam_energy_kev, detector_type = NULL, be_
   }
 
   if (normalization != "none") {
-    comp <- switch(normalization,
-                   compton = "scatter_compton", rayleigh = "scatter_rayleigh",
-                   scatter = c("scatter_compton", "scatter_rayleigh"))
-    denom <- sum(peaks$peak_area[peaks$element %in% comp], na.rm = TRUE)
+    # include the scattered-continuum pseudo-elements (prefix match), not just the anode-line scatter
+    pat <- switch(normalization,
+                  compton = "^scatter_compton", rayleigh = "^scatter_rayleigh",
+                  scatter = "^scatter_(compton|rayleigh)")
+    denom <- sum(peaks$peak_area[grepl(pat, peaks$element)], na.rm = TRUE)
     if (!is.finite(denom) || denom <= 0) {
       stop("normalization = '", normalization, "' needs a fitted scatter peak; run the ",
            "deconvolution with a `tube`.")
     }
     obs <- obs / denom
+    if ("peak_area_se" %in% names(peaks)) {   # ratio error: add the scatter-normalizer's relative SE
+      denom_se <- sqrt(sum(peaks$peak_area_se[grepl(pat, peaks$element)]^2, na.rm = TRUE))
+      rel_se <- sqrt(rel_se^2 + (denom_se / denom)^2)
+    }
   }
   if (!is.null(calibration)) {                       # optional absolute calibration
     if (is.null(names(calibration))) {
       stop("`calibration` must be a named numeric vector keyed by element symbol.")
     }
-    .xrf_check_calibration_settings(calibration, self_absorption, matrix, normalization)
+    .xrf_check_calibration_settings(calibration, .xrf_calibration_settings(
+      self_absorption, matrix, normalization, beam_energy_kev, detector_type, efficiency,
+      match.arg(excitation), match.arg(excitation_weighting), coster_kronig, tube))
     k <- unname(calibration[q$element])
     miss <- q$element[!is.finite(k)]
     if (length(miss) > 0) {                          # NA (not 1): never mix relative + absolute scales
@@ -503,9 +740,12 @@ xrf_observed_mass <- function(object, beam_energy_kev, detector_type = NULL, be_
     obs <- obs * k
   }
 
+  # fold the systematic FP-sensitivity relative uncertainty in quadrature (see xrf_quantify)
+  rel_se <- sqrt(rel_se^2 + .xrf_resolve_rel_se(sensitivity_rel_se, q$element)^2)
   tibble::as_tibble(data.frame(
     element = q$element, primary_energy_kev = q$primary_energy_kev, peak_area = q$peak_area,
-    sensitivity = q$sensitivity, observed_mass = obs, stringsAsFactors = FALSE
+    sensitivity = q$sensitivity, observed_mass = obs, observed_mass_se = obs * rel_se,
+    stringsAsFactors = FALSE
   ))
 }
 
@@ -533,6 +773,10 @@ xrf_observed_mass <- function(object, beam_energy_kev, detector_type = NULL, be_
 #' @param beam_energy_kev,detector_type,be_window_um,dead_layer_um,active_thickness_um,efficiency,excitation,excitation_weighting,coster_kronig,tube,self_absorption,matrix,incidence_deg,takeoff_deg,normalization
 #'   Passed to \link{xrf_observed_mass} to compute the observed values for each standard (use the
 #'   settings you will apply to unknowns).
+#' @param weighting Least-squares weighting of the per-element through-origin slope across standards.
+#'   \code{"none"} (default) is the ordinary slope \eqn{\sum o t / \sum o^2} (homoscedastic; dominated by
+#'   the highest-level standard); \code{"relative"} uses inverse-variance weights \eqn{1/o^2} (proportional
+#'   error), i.e. \eqn{k = \mathrm{mean}(t/o)}, so standards spanning orders of magnitude contribute evenly.
 #'
 #' @return A named numeric vector of per-element calibration factors \eqn{k_i}, with an
 #'   \code{"n_standards"} attribute (points used per element) and a \code{"settings"} attribute
@@ -547,11 +791,13 @@ xrf_calibrate <- function(standards, values, beam_energy_kev, detector_type = NU
                           excitation_weighting = c("cross_section", "jump"), coster_kronig = TRUE,
                           tube = NULL, self_absorption = c("none", "generalized"),
                           matrix = "silicate", incidence_deg = 45, takeoff_deg = 45,
-                          normalization = c("none", "compton", "rayleigh", "scatter")) {
+                          normalization = c("none", "compton", "rayleigh", "scatter"),
+                          weighting = c("none", "relative")) {
   excitation <- match.arg(excitation)
   excitation_weighting <- match.arg(excitation_weighting)
   self_absorption <- match.arg(self_absorption)
   normalization <- match.arg(normalization)
+  weighting <- match.arg(weighting)
   if (inherits(standards, "deconvolution_fit") || is.data.frame(standards)) standards <- list(standards)
   # coerce `values` to a list of named numeric vectors, one per standard
   if (is.numeric(values) && !is.null(names(values))) values <- list(values)   # lone standard
@@ -589,13 +835,19 @@ xrf_calibrate <- function(standards, values, beam_energy_kev, detector_type = NU
       }
     }
     npts[el] <- length(o)
-    # through-origin least-squares slope: calibration is applied multiplicatively
-    # (observed_mass * k), so an intercept could not be reproduced anyway.
-    if (length(o) >= 1) k[el] <- sum(o * t) / sum(o * o)
+    # through-origin slope: calibration is applied multiplicatively (observed_mass * k), so an intercept
+    # could not be reproduced. "none" is the ordinary (homoscedastic) through-origin slope sum(o t)/sum(o^2),
+    # which effectively weights each standard by o^2 and is dominated by the highest-level standard;
+    # "relative" uses inverse-variance weights w = 1/o^2 (proportional error), giving k = mean(t/o) so
+    # standards spanning orders of magnitude in level contribute evenly.
+    if (length(o) >= 1) {
+      k[el] <- if (weighting == "relative") sum(t / o) / length(o) else sum(o * t) / sum(o * o)
+    }
   }
   attr(k, "n_standards") <- npts
-  # record the settings so xrf_observed_mass can warn if they are not matched on the unknowns
-  attr(k, "settings") <- list(self_absorption = self_absorption, matrix = matrix,
-                              normalization = normalization)
+  # record ALL the sensitivity-scale settings so xrf_observed_mass can warn if they are not matched on the unknowns
+  attr(k, "settings") <- .xrf_calibration_settings(self_absorption, matrix, normalization, beam_energy_kev,
+                                                   detector_type, efficiency, excitation, excitation_weighting,
+                                                   coster_kronig, tube)
   k
 }

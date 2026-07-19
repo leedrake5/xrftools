@@ -31,6 +31,8 @@
     "polypropylene" = , "pp" = , "prolene" = list(density = 0.905, composition = c(C = 0.8563, H = 0.1437)),
     "kapton" = , "polyimide"    = list(density = 1.42,  composition = c(C = 0.6911, H = 0.0264, N = 0.0733, O = 0.2092)),
     "mylar" = , "pet"           = list(density = 1.40,  composition = c(C = 0.625017, H = 0.041959, O = 0.333025)),
+    # silicon nitride: common thin, light-element-transparent detector window (Moxtek AP / SiN membranes)
+    "si3n4" = , "sin" = , "silicon nitride" = list(density = 3.17, composition = c(Si = 0.6006, N = 0.3994)),
     NULL
   )
   if (!is.null(cmp)) return(cmp)
@@ -38,15 +40,13 @@
     return(list(density = unname(.xrf_element_density[m]), composition = stats::setNames(1, m)))
   }
   stop("Unknown material '", m, "'. Use an element symbol, CdTe, or a known path material ",
-       "(Air, He, polypropylene, Kapton, Mylar).")
+       "(Air, He, polypropylene, Kapton, Mylar, Si3N4).")
 }
 
-# Total photoelectric mass attenuation (cm^2/g) of a single element vs energy, with log-log
-# interpolation of the packaged cross-section grid and power-law extrapolation beyond it. NOTE: the
-# grid starts at 5 keV, so values below ~5 keV are power-law extrapolated and only approximate.
 # log-log interpolate a single element's mu/rho grid (photoelectric or total), with flat-clamp below
 # the grid and power-law extrapolation above it. The EPDL grid runs from ~5 eV to 200 keV, so the
-# clamp/extrapolation are essentially never reached for real analytical lines.
+# clamp/extrapolation are essentially never reached for real analytical lines (sub-keV light-element
+# lines are interpolated directly from tabulated values, not extrapolated).
 .xrf_interp_mu <- function(g, energy_kev) {
   if (is.null(g) || nrow(g) < 2) return(rep(NA_real_, length(energy_kev)))
   lo <- min(g$energy_kev); hi <- max(g$energy_kev); m <- nrow(g)
@@ -77,6 +77,29 @@
   if (is.numeric(element)) element <- all_elements[element]
   .init_physics_cache()
   .xrf_interp_mu(.xrf_cache$total_mu_split[[element]], energy_kev)
+}
+# coherent (Rayleigh) and incoherent (Compton) scatter mass attenuation (cm^2/g) of one element vs energy
+.xrf_element_rayleigh_mu <- function(element, energy_kev) {
+  if (is.numeric(element)) element <- all_elements[element]
+  .init_physics_cache()
+  .xrf_interp_mu(.xrf_cache$rayleigh_mu_split[[element]], energy_kev)
+}
+.xrf_element_compton_mu <- function(element, energy_kev) {
+  if (is.numeric(element)) element <- all_elements[element]
+  .init_physics_cache()
+  .xrf_interp_mu(.xrf_cache$compton_mu_split[[element]], energy_kev)
+}
+# mass-weighted scatter mass attenuation of a material (element / compound / named composition)
+.xrf_material_scatter_mu <- function(material, energy_kev, type = c("rayleigh", "compton")) {
+  type <- match.arg(type)
+  fn <- if (type == "rayleigh") .xrf_element_rayleigh_mu else .xrf_element_compton_mu
+  info <- .xrf_material_info(material)
+  mu <- rep(0, length(energy_kev))
+  for (el in names(info$composition)) {
+    m <- fn(el, energy_kev); m[!is.finite(m)] <- 0
+    mu <- mu + info$composition[[el]] * m
+  }
+  mu
 }
 
 #' Mass attenuation of a material
@@ -144,12 +167,28 @@ xrf_mass_attenuation <- function(material, energy_kev, type = c("photoelectric",
 #' now computed directly rather than extrapolated. Geometry defaults come from the
 #' \code{detector_type} preset (\link{xrf_detector_presets}); override any of them explicitly.
 #'
+#' By default the active-volume term is the total photoabsorption probability. Set
+#' \code{full_energy_peak = TRUE} to instead return the \strong{full-energy-peak} fraction, i.e.
+#' multiplied by \eqn{(1 - f_{escape}(E))} where \eqn{f_{escape}} is the detector-fluorescence escape
+#' probability (\link{xrf_escape_peaks}); this is the quantity that predicts the measured photopeak area
+#' and is what \link{xrf_fp_sensitivity} uses. The difference is negligible for Si (escape ~1\%) but
+#' reaches ~10-14\% for Ge/CdTe just above their K edges.
+#'
 #' @param energy_kev Photon energy (keV), vectorized.
 #' @param detector_type A preset name (\link{xrf_detector_presets}); sets the material and default
 #'   geometry.
 #' @param active_material,active_thickness_um Active-volume material and thickness (microns).
 #' @param be_window_um Beryllium window thickness (microns).
 #' @param dead_layer_um Dead-layer thickness (microns), assumed to be the active material.
+#' @param full_energy_peak If TRUE, return the full-energy-(photo)peak fraction, i.e. multiply the active
+#'   term by \eqn{(1 - f_{escape})}. Default FALSE returns the total photoabsorption. See Details.
+#' @param active_absorption Active-volume absorption model: "photoelectric" (default; single-interaction
+#'   full-peak, a lower bound for thick detectors at high energy) or "total" (any interaction, an upper
+#'   bound assuming full containment). See Details. Note: combining \code{active_absorption = "total"} with
+#'   \code{full_energy_peak = TRUE} is approximate -- the escape correction \eqn{(1-f_{escape})} is derived
+#'   for photoelectric absorption, so applying it to the total (photoelectric + scatter) interaction
+#'   probability over-applies escape to the scatter events; use "photoelectric" for the self-consistent
+#'   full-energy-peak fraction.
 #'
 #' @return Efficiency in [0, 1], same length as \code{energy_kev}.
 #' @export
@@ -162,7 +201,10 @@ xrf_mass_attenuation <- function(material, energy_kev, type = c("photoelectric",
 xrf_detector_efficiency <- function(energy_kev, detector_type = NULL, active_material = NULL,
                                     active_thickness_um = NULL, be_window_um = NULL,
                                     dead_layer_um = NULL,
-                                    air_path_cm = NULL, atmosphere = "Air", window = NULL) {
+                                    air_path_cm = NULL, atmosphere = "Air", window = NULL,
+                                    full_energy_peak = FALSE,
+                                    active_absorption = c("photoelectric", "total")) {
+  active_absorption <- match.arg(active_absorption)
   geom <- .resolve_detector_geometry(detector_type, active_material, active_thickness_um,
                                      be_window_um, dead_layer_um)
   cm_per_um <- 1e-4
@@ -193,8 +235,27 @@ xrf_detector_efficiency <- function(energy_kev, detector_type = NULL, active_mat
                   geom$dead_layer_um * cm_per_um)
 
   act_rho <- .xrf_material_info(geom$active_material)$density
-  a_active <- 1 - exp(-xrf_mass_attenuation(geom$active_material, energy_kev, type = "photoelectric") *
-                        act_rho * geom$active_thickness_um * cm_per_um)
+  # Active-volume absorption. "photoelectric" (default) counts only photons that photo-absorb on their
+  # FIRST interaction -- a LOWER bound on the full-energy-peak efficiency for a thick detector at high
+  # energy, where a growing share of full-peak events are Compton-scatter(s)-then-photoabsorb (E8).
+  # "total" counts every ENERGY-DEPOSITING interaction -- an UPPER bound, assuming multiple-interaction
+  # events are fully contained in the peak (they are not: some scattered photons escape). We use
+  # photoelectric + incoherent (Compton), i.e. total MINUS coherent (Rayleigh) scatter, since Rayleigh
+  # deposits no energy and cannot contribute to the peak. The true full-peak efficiency lies between the two;
+  # for thin Si they nearly coincide, for thick HPGe/CdTe above ~50 keV they bracket a real uncertainty.
+  act_mu <- if (active_absorption == "total") {
+    pmax(xrf_mass_attenuation(geom$active_material, energy_kev, type = "total") -
+           .xrf_material_scatter_mu(geom$active_material, energy_kev, "rayleigh"), 0)
+  } else {
+    xrf_mass_attenuation(geom$active_material, energy_kev, type = "photoelectric")
+  }
+  a_active <- 1 - exp(-act_mu * act_rho * geom$active_thickness_um * cm_per_um)
+
+  # Full-energy-peak fraction: remove the events whose detector characteristic X-ray escapes the crystal
+  # (recorded in an escape peak, not the photopeak). Negligible for Si, ~10-14% for Ge/CdTe near their K edges.
+  if (isTRUE(full_energy_peak)) {
+    a_active <- a_active * (1 - .xrf_detector_escape_fraction(energy_kev, geom$active_material))
+  }
 
   pmin(pmax(t_path * t_window * t_win * t_dead * a_active, 0), 1)
 }

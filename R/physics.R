@@ -122,8 +122,9 @@ xrf_fluorescence_yield <- function(element, shell, method = "EADL97") {
 
 #' @rdname xrf_absorption_jump
 #' @export
-xrf_coster_kronig_probability <- function(element, shell, coster_kronig_trans, method = "EADL97") {
-  method <- match.arg(method)
+xrf_coster_kronig_probability <- function(element, shell, coster_kronig_trans,
+                                          method = getOption("xrftools.ck_source", "EADL97")) {
+  method <- match.arg(method, c("EADL97", "Elam"))
   if(is.numeric(element)) {
     element <- all_elements[element]
   }
@@ -132,27 +133,56 @@ xrf_coster_kronig_probability <- function(element, shell, coster_kronig_trans, m
   # Initialize cache on first use
   .init_physics_cache()
 
-  # Vectorized named vector lookup
+  # Vectorized named vector lookup. The modern Elam (2002) source is opt-in (xrf_set_ck_source("Elam") /
+  # option xrftools.ck_source), and falls back to EADL97 if that table is not installed.
+  vec <- if (method == "Elam" && !is.null(.xrf_cache$coster_kronig_vec_elam))
+    .xrf_cache$coster_kronig_vec_elam else .xrf_cache$coster_kronig_vec
   keys <- paste(element, shell, coster_kronig_trans, sep = ":")
-  unname(.xrf_cache$coster_kronig_vec[keys])
+  unname(vec[keys])
+}
+
+#' Select the Coster-Kronig data source
+#'
+#' The Coster-Kronig transition probabilities drive the L- (and, with \code{m_cascade}, M-) subshell cascade
+#' that sets heavy-element L-line intensity ratios (\link{xrf_relative_peak_intensity}). The default source is
+#' the built-in EADL97 table; \code{"Elam"} switches every downstream cascade to the modern Elam, Ravel &
+#' Sieber (2002) values without re-plumbing -- they differ most for the L1 transitions (e.g. Pb f12
+#' 0.056 -> 0.040, f13 0.698 -> 0.580), reshaping Pb/W/U/Au L-family templates. Sets the
+#' \code{xrftools.ck_source} option read by \link{xrf_coster_kronig_probability}. Opt-in, so it never changes
+#' results unless called.
+#'
+#' @param source \code{"EADL97"} (default) or \code{"Elam"}.
+#' @return The previous source, invisibly.
+#' @references
+#' Elam, W.T., Ravel, B.D., Sieber, J.R. (2002). A new atomic database for X-ray spectroscopic calculations.
+#' \emph{Radiation Physics and Chemistry} 63, 121-128. \doi{10.1016/S0969-806X(01)00227-4}
+#' @export
+xrf_set_ck_source <- function(source = c("EADL97", "Elam")) {
+  source <- match.arg(source)
+  old <- getOption("xrftools.ck_source", "EADL97")
+  options(xrftools.ck_source = source)
+  invisible(old)
 }
 
 #' Partial photoionization cross section at a given energy
 #'
 #' Interpolates the per-subshell photoelectric cross section from \link{x_ray_cross_sections}
-#' (K, L1, L2, L3, M1-M3; EPDL97; 5-100 keV grid) at an arbitrary incident energy, using log-log
+#' (K, L1, L2, L3, M1-M5; EPDL97; ~5 eV to 200 keV grid) at an arbitrary incident energy, using log-log
 #' interpolation. Below a subshell's absorption edge the tabulated cross section is \code{NA}, so
 #' this returns \code{NA} for incident energies below the edge (the subshell cannot be ionized).
 #' Above the tabulated range the cross section is extrapolated as a power law (photoabsorption falls
-#' roughly as \eqn{E^{-3}} above an edge). Returns \code{NA} for element/shell combinations absent
-#' from the table (e.g. a K edge above the 100 keV grid, such as U).
+#' roughly as \eqn{E^{-3}} above an edge). Returns \code{NA} only for element/shell combinations genuinely
+#' absent from the table (the 200 keV grid covers every element's K edge, U included).
 #'
 #' @param element An element symbol or atomic number (vectorized).
-#' @param shell A subshell ("K", "L1", "L2", "L3", "M1", "M2", "M3").
+#' @param shell A subshell ("K", "L1", "L2", "L3", "M1"-"M5").
 #' @param energy_kev The incident (beam) energy in keV.
 #'
-#' @return A numeric vector of cross sections (same arbitrary units as \link{x_ray_cross_sections};
-#'   only ratios within an element are used downstream, so the unit cancels).
+#' @return A numeric vector of mass photoionization cross sections in \strong{cm^2/g} (as tabulated in
+#'   \link{x_ray_cross_sections}). Most callers use only within-element ratios (so the unit would cancel),
+#'   but the secondary-fluorescence correction in \link{xrf_quantify} forms the cross-section-over-
+#'   mass-attenuation ratio \eqn{\tau_i(E_j)/\mu(E_j)}, which requires these to be in the SAME cm^2/g units as
+#'   \link{x_ray_mass_attenuation} -- so the table must stay in cm^2/g (a regeneration in barns would break it).
 #' @export
 #'
 #' @examples
@@ -337,6 +367,62 @@ xrf_electron_ionization_cross_section <- function(element, shell, beam_energy_ke
   out
 }
 
+# Redistribute primary M-subshell vacancies via M super-Coster-Kronig transfer before radiative decay
+# (analogous to .xrf_ck_cascade for L). Sequential cascade V_k = nMk + sum_{i<k} f_ik * V_Mi with the f_ik
+# from x_ray_coster_kronig_probabilities (source shells M1-M4). The M4/M5 subshells DO have tabulated direct
+# photoionization cross sections, so their Malpha/Mbeta lines are already produced (weakly); this cascade
+# ADDS the super-CK vacancies transferred from M1-M3 on top (both channels are physical and additive),
+# boosting M4/M5 ~4x so they clear the per-element intensity threshold. Non-M rows are returned unchanged.
+.xrf_m_cascade <- function(element, shell, n_row, nM1, nM2, nM3, nM4, nM5) {
+  f <- function(src, tr) dplyr::coalesce(xrf_coster_kronig_probability(element, src, tr), 0)
+  V1 <- nM1
+  V2 <- nM2 + f("M1", "f12") * V1
+  V3 <- nM3 + f("M1", "f13") * V1 + f("M2", "f23") * V2
+  V4 <- nM4 + f("M1", "f14") * V1 + f("M2", "f24") * V2 + f("M3", "f34") * V3
+  V5 <- nM5 + f("M1", "f15") * V1 + f("M2", "f25") * V2 + f("M3", "f35") * V3 + f("M4", "f45") * V4
+  out <- n_row
+  out[shell == "M1"] <- V1[shell == "M1"]
+  out[shell == "M2"] <- V2[shell == "M2"]
+  out[shell == "M3"] <- V3[shell == "M3"]
+  out[shell == "M4"] <- V4[shell == "M4"]
+  out[shell == "M5"] <- V5[shell == "M5"]
+  out
+}
+
+# Shell-partial photoionization vacancy production -- the SAME production basis the primary sensitivity
+# uses (via xrf_relative_peak_intensity): the partial cross section sigma_shell(E) with the L-subshell
+# Coster-Kronig cascade folded in. Vectorized over element/shell/energy (recycled to a common length).
+# Used by the secondary-fluorescence correction so the exciter/absorber production is consistent with the
+# primary; this is NOT the total photoelectric mu (which also counts vacancies in non-emitting shells and
+# so over-counts enhancement). For a shell genuinely absent from the partial table (e.g. an N subshell) it
+# falls back to the total photoelectric mu so production stays positive; M4/M5 ARE tabulated (see body).
+.xrf_shell_production <- function(element, shell, energy_kev, coster_kronig = TRUE) {
+  n <- max(length(element), length(shell), length(energy_kev))
+  element <- rep_len(element, n); shell <- rep_len(shell, n); energy_kev <- rep_len(energy_kev, n)
+  sig <- xrf_photoionization_cross_section(element, shell, energy_kev)
+  # A shell that IS in the partial cross-section table (K, L1-L3, M1-M5 -- ALL are tabulated) but returns
+  # NA is simply BELOW its absorption edge -> production is exactly 0 (the shell cannot be ionized). Only a
+  # shell ABSENT from the table (e.g. an N subshell) falls back to the total photoelectric mu, a positive
+  # proxy so it still gets a finite sensitivity. The M4/M5 subshells ARE tabulated, so they MUST be treated
+  # as tabled: injecting the photoelectric mu below their edges (as an earlier version did) put ~1000s of
+  # cm^2/g of spurious production below the edge and corrupted any integral spanning it (the W1 tube integral).
+  tabled <- shell %in% c("K", "L1", "L2", "L3", "M1", "M2", "M3", "M4", "M5")
+  miss <- !is.finite(sig) & !tabled
+  if (any(miss)) {
+    sig[miss] <- vapply(which(miss), function(k) .xrf_element_pe_mu(element[k], energy_kev[k]), numeric(1))
+  }
+  sig[!is.finite(sig)] <- 0
+  if (isTRUE(coster_kronig)) {
+    sig <- .xrf_ck_cascade(
+      element, shell, sig,
+      dplyr::coalesce(xrf_photoionization_cross_section(element, "L1", energy_kev), 0),
+      dplyr::coalesce(xrf_photoionization_cross_section(element, "L2", energy_kev), 0),
+      dplyr::coalesce(xrf_photoionization_cross_section(element, "L3", energy_kev), 0)
+    )
+  }
+  sig
+}
+
 #' @rdname xrf_absorption_jump
 #' @param excitation_weighting How to weight the primary vacancy production per subshell.
 #'   "cross_section" (default) uses the energy-dependent partial photoionization cross section
@@ -345,6 +431,21 @@ xrf_electron_ionization_cross_section <- function(element, shell, beam_energy_ke
 #'   back to the (energy-independent) absorption-jump ratio only where the cross section is
 #'   unavailable. "jump" uses the absorption-jump ratio everywhere (the classic, beam-independent
 #'   behaviour).
+#'
+#'   \strong{Limitations of "jump" mode.} The jump factor \eqn{(r-1)/r} is the fraction of the
+#'   photoabsorption captured by a subshell \emph{just above its own edge}, evaluated at each shell's
+#'   edge -- \strong{not} the cross-shell (K:L) vacancy-production ratio at a common beam energy. So
+#'   in wide-energy XRF where both series are excited, "jump" gives K:L intensity ratios that can be
+#'   ~10x off (e.g. Pb K\eqn{\alpha}:L\eqn{\alpha} at 90 keV is ~2 in jump mode vs ~15 with the
+#'   physical cross sections); prefer "cross_section" whenever cross-shell ratios matter. Also, the
+#'   Veigele jump-ratio coefficients only cover K/L1/L2/L3, so "jump" returns \code{NA} (and
+#'   \link{xrf_energies} silently drops) all \strong{M-shell} lines -- an M-only element (e.g. a heavy
+#'   element excited below its L edges) yields no lines in "jump" mode. Use "cross_section" (which has
+#'   M1-M3 cross sections) or \code{excitation = "electron"} (Bote-Salvat, full M series) for M lines.
+#'   (Note: the M4/M5 subshells have tabulated photoionization cross sections, so their
+#'   M\eqn{\alpha}/M\eqn{\beta} lines ARE produced in "cross_section" photon mode -- but only weakly, and
+#'   without \code{m_cascade} they usually fall below the per-element intensity threshold and are dropped by
+#'   \link{xrf_energies}; the default \code{m_cascade = TRUE} adds the M super-Coster-Kronig boost.)
 #' @param coster_kronig If TRUE (default) redistribute L1/L2 vacancies down the L subshells via
 #'   Coster-Kronig transfer (\link{x_ray_coster_kronig_probabilities}) before radiative decay,
 #'   correcting the relative intensities of the L family for heavier elements.
@@ -352,11 +453,18 @@ xrf_electron_ionization_cross_section <- function(element, shell, beam_energy_ke
 #'   photoionization cross section (or jump ratio); "electron" (SEM-EDS) uses the electron-impact
 #'   ionization cross section \link{xrf_electron_ionization_cross_section} instead, so the M series
 #'   of heavy elements is correctly enhanced at low beam energy.
+#' @param m_cascade If TRUE (default), apply an M-subshell super-Coster-Kronig cascade (analogous to
+#'   \code{coster_kronig} for the L shells). This transfers M1-M3 vacancy production down to M4/M5
+#'   \strong{on top of their direct photoionization}, boosting the M\eqn{\alpha}/M\eqn{\beta} lines of the
+#'   M4/M5 subshells ~4x -- without it those lines are produced but usually too weak to clear the per-element
+#'   intensity threshold (so \link{xrf_energies} drops them). Set \code{m_cascade = FALSE} for the legacy
+#'   behaviour that omitted the M4/M5 cascade.
 #' @export
 xrf_relative_peak_intensity <- function(element, shell, trans, beam_energy_kev = 50,
                                         excitation_weighting = c("cross_section", "jump"),
                                         coster_kronig = TRUE,
-                                        excitation = c("photon", "electron")) {
+                                        excitation = c("photon", "electron"),
+                                        m_cascade = TRUE) {
   # The relative intensity of a primary-fluorescence line is
   #   (subshell vacancy production at E0) x (omega * radiative branching).
   # The EADL97 emission probability (via xrf_transition_probability) ALREADY includes the
@@ -389,12 +497,29 @@ xrf_relative_peak_intensity <- function(element, shell, trans, beam_energy_kev =
       is_l <- shell %in% c("L1", "L2", "L3")
       n_shell <- ifelse(is_l, v_eff, n_shell)
     }
+    if (m_cascade) {
+      v_m <- .xrf_m_cascade(
+        element, shell, n_shell,
+        xrf_electron_ionization_cross_section(element, "M1", beam_energy_kev),
+        xrf_electron_ionization_cross_section(element, "M2", beam_energy_kev),
+        xrf_electron_ionization_cross_section(element, "M3", beam_energy_kev),
+        xrf_electron_ionization_cross_section(element, "M4", beam_energy_kev),
+        xrf_electron_ionization_cross_section(element, "M5", beam_energy_kev)
+      )
+      is_m <- shell %in% c("M1", "M2", "M3", "M4", "M5")
+      n_shell <- ifelse(is_m, v_m, n_shell)
+    }
     return(n_shell * xrf_transition_probability(element, trans))
   }
 
   jr <- xrf_absorption_jump_ratio(element, shell)
 
   if (excitation_weighting == "jump") {
+    if (any(shell %in% c("M1", "M2", "M3", "M4", "M5"))) {
+      warning("excitation_weighting = 'jump' has no M-shell jump ratios (Veigele covers K/L only); ",
+              "requested M lines return NA and are dropped. Use excitation_weighting = 'cross_section' ",
+              "for M-line work.", call. = FALSE)
+    }
     n_shell <- jr
     if (coster_kronig) {
       n_shell <- .xrf_ck_cascade(
@@ -422,6 +547,15 @@ xrf_relative_peak_intensity <- function(element, shell, trans, beam_energy_kev =
       is_l <- shell %in% c("L1", "L2", "L3")
       n_shell <- ifelse(is_l, v_eff, n_shell)
     }
+  }
+
+  if (m_cascade) {
+    # M super-Coster-Kronig cascade (opt-in): adds the super-CK transfer from M1-M3 to the M4/M5 subshells
+    # (on top of their direct photoionization), boosting their Malpha/Mbeta lines so they clear threshold.
+    mp <- function(sh) dplyr::coalesce(xrf_photoionization_cross_section(element, sh, beam_energy_kev), 0)
+    v_m <- .xrf_m_cascade(element, shell, n_shell, mp("M1"), mp("M2"), mp("M3"), mp("M4"), mp("M5"))
+    is_m <- shell %in% c("M1", "M2", "M3", "M4", "M5")
+    n_shell <- ifelse(is_m, v_m, n_shell)
   }
 
   n_shell * xrf_transition_probability(element, trans)
@@ -459,7 +593,7 @@ xrf_relative_peak_intensity <- function(element, shell, trans, beam_energy_kev =
 xrf_energies <- function(elements = "everything", beam_energy_kev = 50, ...,
                          excitation = c("photon", "electron"), overvoltage_min = 1,
                          excitation_weighting = c("cross_section", "jump"),
-                         coster_kronig = TRUE,
+                         coster_kronig = TRUE, m_cascade = TRUE,
                          min_relative_intensity = 0.01) {
   excitation <- match.arg(excitation)
   excitation_weighting <- match.arg(excitation_weighting)
@@ -473,15 +607,22 @@ xrf_energies <- function(elements = "everything", beam_energy_kev = 50, ...,
       relative_peak_intensity = xrf_relative_peak_intensity(
         .data$element, .data$edge, .data$trans, !!beam_energy_kev,
         excitation_weighting = !!excitation_weighting, coster_kronig = !!coster_kronig,
-        excitation = !!excitation
+        excitation = !!excitation, m_cascade = !!m_cascade
       )
     ) %>%
     filter(!is.na(.data$relative_peak_intensity)) %>%
+    # Excitability cut MUST precede the per-element max-normalization: a non-excitable K/M line
+    # (edge above the beam) gets a beam-independent jump-ratio fallback in cross_section mode, which
+    # can exceed every truly-excited line and hijack the per-element maximum, rescaling all real
+    # lines (and skewing the min_relative_intensity cull). Removing below-edge lines first keeps the
+    # normalization over only the lines that can actually be excited.
+    dplyr::filter(.data$edge_kev <= !!edge_cut) %>%
     dplyr::group_by(.data$element) %>%
-    dplyr::mutate(relative_peak_intensity = .data$relative_peak_intensity / max(.data$relative_peak_intensity)) %>%
+    # suppressWarnings guards the degenerate case where the edge cut leaves no excitable line at all
+    # (e.g. beam_energy_kev = 0): max() of an empty group would warn; the result is an empty frame.
+    dplyr::mutate(relative_peak_intensity = .data$relative_peak_intensity / suppressWarnings(max(.data$relative_peak_intensity))) %>%
     dplyr::filter(
       .data$element %in% !!elements,
-      .data$edge_kev <= !!edge_cut,
       .data$relative_peak_intensity >= min_relative_intensity,
       ...
     ) %>%

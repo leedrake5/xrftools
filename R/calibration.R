@@ -30,7 +30,15 @@ xrf_calibrate_energy <- function(channel, gain, zero = 0, quad = 0) {
     is.numeric(channel), is.numeric(gain), length(gain) == 1,
     is.numeric(zero), length(zero) == 1, is.numeric(quad), length(quad) == 1
   )
-  zero + gain * channel + quad * channel^2
+  energy <- zero + gain * channel + quad * channel^2
+  # keV/eV sanity (same guard as xrf_spectra_from_counts): warn if the axis is implausibly high for keV,
+  # the tell-tale of an eV/channel gain (e.g. 20 instead of 0.02) that silently 1000x-corrupts every module.
+  e_max <- suppressWarnings(max(energy, na.rm = TRUE))
+  if (is.finite(e_max) && e_max > 200) {
+    warning("xrf_calibrate_energy(): the energy axis reaches ", signif(e_max, 4),
+            " keV, implausibly high -- did you pass `gain`/`zero` in eV rather than keV?", call. = FALSE)
+  }
+  energy
 }
 
 #' Build a spectra object from a raw counts vector and an energy calibration
@@ -64,6 +72,16 @@ xrf_spectra_from_counts <- function(counts, gain, zero = 0, quad = 0,
                                     livetime = NA_real_, ..., .validate = TRUE) {
   stopifnot(is.numeric(counts), length(counts) >= 1, length(channel) == length(counts))
   energy_kev <- xrf_calibrate_energy(channel, gain = gain, zero = zero, quad = quad)
+  # keV/eV sanity check: the whole package assumes keV. A gain given in eV/channel (e.g. 20 instead of
+  # 0.02) produces a ~1000x-too-large axis that silently corrupts every downstream module (detector
+  # resolution, mass-attenuation lookups, template centroids). Warn on an implausible range rather than
+  # letting it through -- a common, high-leverage footgun.
+  e_max <- suppressWarnings(max(energy_kev, na.rm = TRUE))
+  if (is.finite(e_max) && e_max > 200) {
+    warning("xrf_spectra_from_counts(): the energy axis reaches ", signif(e_max, 4),
+            " keV, which is implausibly high -- did you pass `gain`/`zero` in eV rather than keV? ",
+            "This package expects keV (keV per channel for `gain`).", call. = FALSE)
+  }
   has_lt <- length(livetime) == 1 && is.finite(livetime) && livetime > 0
   cps <- if (has_lt) counts / livetime else as.numeric(counts)
   spect <- tibble::tibble(

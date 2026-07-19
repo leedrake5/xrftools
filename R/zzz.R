@@ -26,6 +26,13 @@
     ck_keys <- paste(ck$element, ck$shell, ck$coster_kronig_trans, sep = ":")
     .xrf_cache$coster_kronig_vec <- setNames(ck$coster_kronig_prob, ck_keys)
 
+    # Optional MODERN Coster-Kronig source (Elam, Ravel & Sieber 2002; opt-in via xrf_set_ck_source("Elam")
+    # or option xrftools.ck_source). Built only if the data-raw-generated table is present, else NULL.
+    .xrf_cache$coster_kronig_vec_elam <- tryCatch({
+      cke <- x_ray_coster_kronig_probabilities_elam
+      setNames(cke$coster_kronig_prob, paste(cke$element, cke$shell, cke$coster_kronig_trans, sep = ":"))
+    }, error = function(e) NULL)
+
     # Build per (element:shell) photoionization cross-section grids for log-log interpolation.
     # Below an edge the tabulated cross section is NA; drop those so each grid starts at the edge.
     xs <- x_ray_cross_sections
@@ -48,6 +55,16 @@
     tot_ok <- ma[is.finite(ma$total) & ma$total > 0, ]
     .xrf_cache$total_mu_split <- split(
       data.frame(energy_kev = tot_ok$energy_kev, mu = tot_ok$total), tot_ok$element
+    )
+    # coherent (Rayleigh) and incoherent (Compton) scatter mass attenuation (cm^2/g), for the scattered-
+    # continuum templates (xrf_scatter_continuum): the shape of the sample scatter background vs energy.
+    ray_ok <- ma[is.finite(ma$rayleigh) & ma$rayleigh > 0, ]
+    .xrf_cache$rayleigh_mu_split <- split(
+      data.frame(energy_kev = ray_ok$energy_kev, mu = ray_ok$rayleigh), ray_ok$element
+    )
+    com_ok <- ma[is.finite(ma$compton) & ma$compton > 0, ]
+    .xrf_cache$compton_mu_split <- split(
+      data.frame(energy_kev = com_ok$energy_kev, mu = com_ok$compton), com_ok$element
     )
 
     # Subshell absorption-edge energies keyed "element:shell" (from the line table), used by the

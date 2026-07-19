@@ -49,7 +49,7 @@
 #' plot(e, xrf_tube_spectrum(xrf_tube("Rh", kv = 40), e), type = "l")
 #'
 xrf_tube_spectrum <- function(tube, energy_kev, takeoff_deg = 40, char_peak_ratio = 100,
-                              filter = TRUE) {
+                              filter = TRUE, discrete_lines = FALSE) {
   stopifnot(inherits(tube, "xrf_tube"))
   anode <- strsplit(trimws(as.character(tube$anode)), "\\s+")[[1]][1]
   if (!(anode %in% all_elements)) stop("tube anode '", tube$anode, "' is not a recognized element.")
@@ -57,15 +57,19 @@ xrf_tube_spectrum <- function(tube, energy_kev, takeoff_deg = 40, char_peak_rati
   E0 <- tube$kv
   E <- energy_kev
 
-  # Ebel bremsstrahlung continuum ~ Z * (E0/E - 1)^x / E, with the Ebel energy exponent
+  # Ebel bremsstrahlung PHOTON-number continuum ~ Z * (E0/E - 1)^x (at x=1 this is exactly the
+  # Kramers photon spectrum (E0-E)/E). Do NOT divide by E again -- an extra /E would give an
+  # intensity/E^2 shape and over-weight soft photons, and the excitation integral needs photons/keV.
   x <- 1.109 - 0.00435 * Z + 0.00175 * E0
-  cont <- Z * pmax(E0 / E - 1, 0)^x / E
+  cont <- Z * pmax(E0 / E - 1, 0)^x
 
   # self-absorption of the continuum escaping the anode (Ebel), using the anode mass attenuation and
-  # an approximate mean production mass-depth
+  # an approximate mean production mass-depth. Ebel's rho*z uses the mean ionization potential J in
+  # keV: J ~= 0.0115*Z keV (= 11.5*Z eV). Using 11.5*Z here would put J in eV and make sqrt(J) ~32x
+  # too large (m_depth deeper than the electron range), so use 0.0115*Z.
   mu_a <- xrf_mass_attenuation(anode, E, type = "total")
   sin_eps <- sin(takeoff_deg * pi / 180)
-  m_depth <- 0.787e-5 * sqrt(11.5 * Z) * E0^1.5 + 0.735e-6 * E0^2   # g/cm^2 (approx.)
+  m_depth <- 0.787e-5 * sqrt(0.0115 * Z) * E0^1.5 + 0.735e-6 * E0^2   # g/cm^2 (approx.)
   tau <- 2 * mu_a * m_depth / max(sin_eps, 1e-3)
   f_a <- ifelse(tau > 1e-9, (1 - exp(-tau)) / tau, 1)
   cont <- cont * f_a
@@ -73,27 +77,41 @@ xrf_tube_spectrum <- function(tube, energy_kev, takeoff_deg = 40, char_peak_rati
 
   if (isTRUE(filter)) cont <- cont * .xrf_filter_transmission(tube$filter, E)
 
-  # characteristic lines of the anode (as narrow Gaussians towering over the local continuum)
-  out <- cont
+  # characteristic lines of the anode (narrow Gaussians towering over the local continuum). Computed once
+  # into `char_lines` (energy, height amp, integrated flux = amp*s_line*sqrt(2*pi)) so callers can either
+  # render them as Gaussians (default) or, via discrete_lines = TRUE, get them as discrete lines -- the
+  # excitation integral needs the latter, because a 0.03-keV line sampled on the ~0.1-keV grid is badly
+  # under-integrated (grid-phase jitter).
+  s_line <- 0.03
+  char_lines <- NULL
   if (E0 > 0 && char_peak_ratio > 0) {
     lines <- tryCatch(xrf_energies(anode, beam_energy_kev = E0, min_relative_intensity = 0.02),
                       error = function(e) NULL)
     if (!is.null(lines) && nrow(lines) > 0) {
-      s_line <- 0.03
       cont_at <- function(en) {
-        v <- Z * pmax(E0 / en - 1, 0)^x / en *
+        v <- Z * pmax(E0 / en - 1, 0)^x *
           ifelse(2 * xrf_mass_attenuation(anode, en, "total") * m_depth / max(sin_eps, 1e-3) > 1e-9,
                  (1 - exp(-2 * xrf_mass_attenuation(anode, en, "total") * m_depth / max(sin_eps, 1e-3))) /
                    (2 * xrf_mass_attenuation(anode, en, "total") * m_depth / max(sin_eps, 1e-3)), 1)
         if (isTRUE(filter)) v <- v * .xrf_filter_transmission(tube$filter, en)
         v
       }
-      for (i in seq_len(nrow(lines))) {
-        ei <- lines$energy_kev[i]
-        if (ei >= E0) next
-        amp <- char_peak_ratio * lines$relative_peak_intensity[i] * cont_at(ei)
-        out <- out + amp * exp(-0.5 * ((E - ei) / s_line)^2)
+      keep <- lines$energy_kev < E0
+      ei <- lines$energy_kev[keep]
+      if (length(ei)) {
+        amp <- char_peak_ratio * lines$relative_peak_intensity[keep] * cont_at(ei)
+        char_lines <- data.frame(energy_kev = ei, amp = amp, flux = amp * s_line * sqrt(2 * pi))
       }
+    }
+  }
+  if (isTRUE(discrete_lines)) {
+    return(if (is.null(char_lines)) data.frame(energy_kev = numeric(0), flux = numeric(0))
+           else char_lines[, c("energy_kev", "flux")])
+  }
+  out <- cont
+  if (!is.null(char_lines)) {
+    for (i in seq_len(nrow(char_lines))) {
+      out <- out + char_lines$amp[i] * exp(-0.5 * ((E - char_lines$energy_kev[i]) / s_line)^2)
     }
   }
   out

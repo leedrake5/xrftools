@@ -62,6 +62,14 @@ xrf_detector_fwhm_ev <- function(energy_kev, detector_type = NULL, fano = NULL,
 #' from an instrument's own calibration (e.g. the \code{NoiseReference}/\code{FanoReference} fields
 #' parsed by \link{read_xrf_panalytical}).
 #'
+#' The \code{"SDD-windowless"} preset (no Be window, thin dead layer) is for light-element (B/C/N/O)
+#' SEM-EDS work: an 8 um Be window blocks sub-0.5 keV lines entirely, so pass a thin polymer or
+#' silicon-nitride window instead (e.g. \code{window = "Si3N4 0.15"} or \code{"polypropylene 0.4"} to
+#' \link{xrf_detector_efficiency}). \strong{Note on CdTe:} the FWHM here is the Fano-limited electronic
+#' value only; real CdTe/CZT resolution is dominated by incomplete charge collection (hole tailing),
+#' so the tabulated width is a best case -- enable the Hypermet tail in the deconvolution
+#' (\link{xrf_lineshape}) and expect broader, low-energy-tailed peaks in practice.
+#'
 #' @return A tibble of presets: \code{type}, \code{material}, \code{fano}, \code{epsilon_ev},
 #'   \code{noise_fwhm_ev}, \code{active_thickness_um}, \code{be_window_um}, \code{dead_layer_um}.
 #' @export
@@ -71,15 +79,64 @@ xrf_detector_fwhm_ev <- function(energy_kev, detector_type = NULL, fano = NULL,
 #'
 xrf_detector_presets <- function() {
   tibble::tribble(
-    ~type,   ~material, ~fano,  ~epsilon_ev, ~noise_fwhm_ev, ~active_thickness_um, ~be_window_um, ~dead_layer_um,
-    "SDD",   "Si",      0.115,  3.64,        50,             0.45e3,               8.0,           0.10,
-    "SiLi",  "Si",      0.115,  3.64,        80,             3.0e3,                12.0,          0.10,
-    "SiPIN", "Si",      0.115,  3.64,        90,             0.5e3,                12.5,          0.10,
-    "Si",    "Si",      0.115,  3.64,        50,             0.45e3,               8.0,           0.10,
-    "HPGe",  "Ge",      0.110,  2.96,        90,             5.0e3,                25.0,          0.30,
-    "Ge",    "Ge",      0.110,  2.96,        90,             5.0e3,                25.0,          0.30,
-    "CdTe",  "CdTe",    0.150,  4.43,        90,             1.0e3,                4.0,           0.10
+    ~type,            ~material, ~fano,  ~epsilon_ev, ~noise_fwhm_ev, ~active_thickness_um, ~be_window_um, ~dead_layer_um,
+    "SDD",            "Si",      0.115,  3.64,        50,             0.45e3,               8.0,           0.10,
+    "SDD-windowless", "Si",      0.115,  3.64,        50,             0.45e3,               0.0,           0.05,
+    "SiLi",           "Si",      0.115,  3.64,        80,             3.0e3,                12.0,          0.10,
+    "SiPIN",          "Si",      0.115,  3.64,        90,             0.5e3,                12.5,          0.10,
+    "Si",             "Si",      0.115,  3.64,        50,             0.45e3,               8.0,           0.10,
+    "HPGe",           "Ge",      0.110,  2.96,        90,             5.0e3,                25.0,          0.30,
+    "Ge",             "Ge",      0.110,  2.96,        90,             5.0e3,                25.0,          0.30,
+    "CdTe",           "CdTe",    0.150,  4.43,        90,             1.0e3,                4.0,           0.10
   )
+}
+
+#' Energy-dependent detector line-shape tailing (incomplete charge collection)
+#'
+#' A real semiconductor-detector peak has a low-energy exponential \strong{tail} and a flat \strong{shelf}
+#' (step) from incomplete charge collection (ICC), whose amplitudes vary with photon energy and detector
+#' material -- unlike the single global \code{tail}/\code{step} scalars of
+#' \link{xrf_deconvolute_gaussian_least_squares}. This returns a physically-motivated, \strong{tunable}
+#' estimate of \code{(tail, step, beta)} versus energy that you can feed to the deconvolution (or
+#' \link{xrf_lineshape}) instead of guessing a constant: for silicon the tail grows toward \emph{low}
+#' energy (front-surface charge loss), while for germanium / CdTe the hole-tailing grows toward \emph{high}
+#' energy. These are approximate defaults (real ICC is instrument-specific) -- scale them with
+#' \code{tail_ref}/\code{step_ref} to match a measured line shape.
+#'
+#' @param energy_kev Photon energy (keV), vectorized.
+#' @param detector_type A preset name (\link{xrf_detector_presets}); sets the active material.
+#' @param tail_ref,step_ref Reference tail / shelf amplitudes (relative to the Gaussian peak) at the
+#'   pivot energy. \code{NULL} uses a material default (Si ~0.01/0.005, Ge ~0.02/0.008, CdTe ~0.05/0.02).
+#' @param fano,epsilon_ev,noise_fwhm_ev Detector resolution overrides for the returned \code{beta}
+#'   (defaults to the Gaussian sigma at each energy).
+#'
+#' @return A list with numeric vectors \code{tail}, \code{step}, \code{beta} (keV), one per
+#'   \code{energy_kev}.
+#' @export
+#'
+#' @examples
+#' xrf_detector_tailing(c(2, 6, 20), "SDD")
+#' xrf_detector_tailing(c(20, 60, 100), "CdTe")   # hole-tailing grows with energy
+#'
+xrf_detector_tailing <- function(energy_kev, detector_type = NULL, tail_ref = NULL, step_ref = NULL,
+                                 fano = NULL, epsilon_ev = NULL, noise_fwhm_ev = NULL) {
+  material <- resolve_detector_params(detector_type)$material
+  # material-family defaults (relative amplitude at the pivot energy) and the energy trend of the tail
+  d <- switch(material,
+    "Si"   = list(tail0 = 0.010, step0 = 0.005, pivot = 6,  trend = "low"),   # surface loss: grows at low E
+    "Ge"   = list(tail0 = 0.020, step0 = 0.008, pivot = 60, trend = "high"),  # hole tailing: grows at high E
+    "CdTe" = list(tail0 = 0.050, step0 = 0.020, pivot = 60, trend = "high"),
+    list(tail0 = 0.010, step0 = 0.005, pivot = 6, trend = "low")
+  )
+  if (!is.null(tail_ref)) d$tail0 <- tail_ref
+  if (!is.null(step_ref)) d$step0 <- step_ref
+  e <- pmax(energy_kev, 0.1)
+  f <- if (d$trend == "low") pmin(d$pivot / e, 5) else pmin(e / d$pivot, 5)  # bounded energy trend
+  beta <- xrf_detector_sigma_kev(energy_kev, detector_type = detector_type, fano = fano,
+                                 epsilon_ev = epsilon_ev, noise_fwhm_ev = noise_fwhm_ev)
+  # both the tail and the shelf (step) arise from incomplete charge collection, so give the shelf the same
+  # energy trend as the tail (rather than holding it constant) for internal consistency.
+  list(tail = d$tail0 * f, step = d$step0 * f, beta = beta)
 }
 
 # Resolve (detector_type + explicit overrides) -> concrete (fano, epsilon_ev, noise_fwhm_ev).

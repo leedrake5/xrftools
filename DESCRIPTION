@@ -22,7 +22,8 @@ Imports:
   ggplot2,
   ggrepel,
   data.table,
-  nnls
+  nnls,
+  Matrix
 License: GPL-3
 Encoding: UTF-8
 LazyData: true

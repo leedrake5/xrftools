@@ -19,6 +19,37 @@
   list(k_edge = k_edge, lines = lines)
 }
 
+# Total detector escape probability at each incident energy: the fraction of photoelectric events whose
+# characteristic X-ray (Si/Ge K, or Cd/Te K for CdTe) escapes the crystal, so the event is NOT recorded in
+# the full-energy peak. Same per-line formula as xrf_escape_peaks() (kept in sync so the escaped fraction
+# and the escape-satellite amplitudes conserve total photoabsorption), summed over the detector's K lines
+# and absorbers. Used by xrf_detector_efficiency(full_energy_peak = TRUE) to turn the photoabsorption
+# probability into the full-energy-peak fraction (1 - f_escape).
+.xrf_detector_escape_fraction <- function(energy_kev, material) {
+  info <- .xrf_material_info(material)
+  absorbers <- names(info$composition)
+  f_tot <- rep(0, length(energy_kev))
+  mu_i_pe  <- xrf_mass_attenuation(material, energy_kev, type = "photoelectric")  # for the absorber share
+  mu_i_tot <- xrf_mass_attenuation(material, energy_kev, type = "total")          # for the escape bracket (W13)
+  for (A in absorbers) {
+    esc <- .xrf_escape_lines(A)
+    if (is.na(esc$k_edge) || nrow(esc$lines) == 0) next
+    jump_k <- xrf_absorption_jump_ratio(A, "K")
+    comp_A <- info$composition[[A]]
+    above <- is.finite(energy_kev) & energy_kev > esc$k_edge
+    if (!any(above)) next
+    w_A <- comp_A * .xrf_element_pe_mu(A, energy_kev) / mu_i_pe  # this absorber's share of the absorption
+    for (j in seq_len(nrow(esc$lines))) {
+      mu_esc_tot <- xrf_mass_attenuation(material, esc$lines$energy[j], type = "total")
+      bracket <- 1 - (mu_esc_tot / mu_i_tot) * log(1 + mu_i_tot / mu_esc_tot)
+      f <- 0.5 * jump_k * esc$lines$emission_prob[j] * bracket * w_A
+      f[!above | !is.finite(f) | f < 0] <- 0
+      f_tot <- f_tot + f
+    }
+  }
+  pmin(pmax(f_tot, 0), 0.99)
+}
+
 #' Build detector escape-peak templates
 #'
 #' When a photon of energy \eqn{E} is photoelectrically absorbed in the detector, the detector's own
@@ -28,6 +59,12 @@
 #' spurious elements. This returns escape satellite rows for each parent line in \code{peaks} whose
 #' energy is above the detector's K edge; each is tagged with the parent's \code{element} so that,
 #' when appended to \code{peaks}, it is tied to the same fitted amplitude (no free parameter).
+#'
+#' \strong{K-shell escape only.} Only the detector's K X-rays are modelled. For CdTe this means no escape
+#' is produced below the Cd/Te K edges (~26.7/31.8 keV) -- i.e. across most of its usual working band -- even
+#' though the Cd/Te \strong{L} X-rays (~3-4.6 keV) can escape there; the escape fraction (and hence the
+#' \code{full_energy_peak} loss in \link{xrf_detector_efficiency}) is therefore a lower bound for CdTe below
+#' its K edges. L-escape is negligible for Si/Ge (their L X-rays are absorbed within a few nm).
 #'
 #' The escape fraction follows
 #' \deqn{f = \tfrac{1}{2}\,\omega_K\,(1-1/r)\,[\,1 - (\mu_{esc}/\mu_i)\ln(1 + \mu_i/\mu_{esc})\,]}
@@ -77,14 +114,19 @@ xrf_escape_peaks <- function(peaks, detector_type = NULL, active_material = NULL
     parent_ok <- which(is.finite(peaks$energy_kev) & peaks$energy_kev > esc$k_edge)
     if (length(parent_ok) == 0) next
     E_par <- peaks$energy_kev[parent_ok]
-    mu_i <- xrf_mass_attenuation(material, E_par)
-    # fraction of the absorption due to this absorber (1 for an elemental detector)
-    w_A <- comp_A * .xrf_element_pe_mu(A, E_par) / mu_i
+    # w_A (this absorber's share of the absorption) follows PHOTOELECTRIC absorption -- escape only happens
+    # after a photoelectric event -- so its denominator is the material photoelectric mu.
+    mu_i_pe <- xrf_mass_attenuation(material, E_par, type = "photoelectric")
+    # The escape bracket models the depth distribution of the absorbed photon and the reabsorption of the
+    # escaping detector X-ray, both governed by TOTAL attenuation (W13; below ~30 keV total ~= PE so this is
+    # unchanged, but for Ge/CdTe above ~70 keV where Compton makes PE < total it was ~15-30% too low).
+    mu_i_tot <- xrf_mass_attenuation(material, E_par, type = "total")
+    w_A <- comp_A * .xrf_element_pe_mu(A, E_par) / mu_i_pe
 
     for (j in seq_len(nrow(esc$lines))) {
       E_esc <- esc$lines$energy[j]
-      mu_esc <- xrf_mass_attenuation(material, E_esc)
-      bracket <- 1 - (mu_esc / mu_i) * log(1 + mu_i / mu_esc)
+      mu_esc_tot <- xrf_mass_attenuation(material, E_esc, type = "total")
+      bracket <- 1 - (mu_esc_tot / mu_i_tot) * log(1 + mu_i_tot / mu_esc_tot)
       f <- 0.5 * jump_k * esc$lines$emission_prob[j] * bracket * w_A
       esc_E <- E_par - E_esc
       keep <- is.finite(f) & f > min_escape_fraction & esc_E > 0
