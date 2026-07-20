@@ -8,7 +8,7 @@
 An object of class \code{tbl_df} (inherits from \code{tbl}, \code{data.frame}) with 109912 rows and 7 columns.
 }
 \source{
-EPDL97 (\url{http://www-nds.iaea.org/epdl97/libsall.htm}), via the specfile conversion vendored
+EPDL97 (\url{https://nds.iaea.org/epdl97/libsall.htm}), via the specfile conversion vendored
 in \code{data-raw/EPDL97_CrossSections.dat}.
 }
 \usage{

@@ -18,6 +18,15 @@ These are sensible defaults only -- override any value with the explicit \code{f
 from an instrument's own calibration (e.g. the \code{NoiseReference}/\code{FanoReference} fields
 parsed by \link{read_xrf_panalytical}).
 }
+\details{
+The \code{"SDD-windowless"} preset (no Be window, thin dead layer) is for light-element (B/C/N/O)
+SEM-EDS work: an 8 um Be window blocks sub-0.5 keV lines entirely, so pass a thin polymer or
+silicon-nitride window instead (e.g. \code{window = "Si3N4 0.15"} or \code{"polypropylene 0.4"} to
+\link{xrf_detector_efficiency}). \strong{Note on CdTe:} the FWHM here is the Fano-limited electronic
+value only; real CdTe/CZT resolution is dominated by incomplete charge collection (hole tailing),
+so the tabulated width is a best case -- enable the Hypermet tail in the deconvolution
+(\link{xrf_lineshape}) and expect broader, low-energy-tailed peaks in practice.
+}
 \examples{
 xrf_detector_presets()
 

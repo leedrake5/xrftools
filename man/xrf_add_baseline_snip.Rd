@@ -10,6 +10,10 @@ xrf_add_baseline_snip(
   ...,
   energy_aware = FALSE,
   .energy_kev = .data$.spectra$energy_kev,
+  detector_type = NULL,
+  fano = NULL,
+  epsilon_ev = NULL,
+  noise_fwhm_ev = NULL,
   .clamp = -Inf,
   .env = parent.frame()
 )
@@ -21,14 +25,26 @@ xrf_add_baseline_snip(
 
 \item{...}{Passed to \link[baseline]{baseline}. Evaluated rowwise using objects in \code{spectra}.}
 
+\item{energy_aware}{Warp onto the constant-resolution abscissa before SNIP (see Details).}
+
+\item{.energy_kev}{Channel energies (keV); used only when \code{energy_aware = TRUE} to build the warp.}
+
+\item{detector_type, fano, epsilon_ev, noise_fwhm_ev}{Detector resolution model for the energy-aware warp
+(see \link{xrf_detector_fwhm_ev}); default an SDD.}
+
 \item{.clamp}{The minimum allowable value for background}
 
 \item{.env}{The calling environment}
 }
 \description{
-Based on \link[Peaks]{SpectrumBackground} (Peaks package). The most useful parameter to change is the
+A native SNIP baseline (\link{xrf_snip_background}). The most useful parameter to change is the
 \code{iterations} argument (higher value will result in a more conservative baseline estimation).
 }
 \details{
-... Passed to \link[Peaks]{SpectrumBackground}
+With \code{energy_aware = TRUE} the SNIP window is warped onto a constant-resolution abscissa built from
+the detector FWHM model; \code{detector_type} / \code{fano} / \code{epsilon_ev} / \code{noise_fwhm_ev}
+select that model and \strong{default to an SDD (silicon)} when not supplied -- pass the detector you are
+actually using (matching the deconvolution) so the warp uses the right resolution curve.
+
+... Passed to \link{xrf_snip_background} (\code{iterations}, \code{decreasing}).
 }

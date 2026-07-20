@@ -9,7 +9,8 @@ xrf_tube_spectrum(
   energy_kev,
   takeoff_deg = 40,
   char_peak_ratio = 100,
-  filter = TRUE
+  filter = TRUE,
+  discrete_lines = FALSE
 )
 }
 \arguments{
@@ -24,6 +25,8 @@ the local continuum (tube characteristic lines tower over the continuum; this se
 line/continuum balance and is a modelling approximation).}
 
 \item{filter}{Apply the tube's primary-beam \code{filter} (if any)?}
+
+\item{discrete_lines}{If TRUE, return the anode characteristic lines as discrete lines rather than rendered Gaussians (default FALSE).}
 }
 \value{
 Relative photon flux at each \code{energy_kev} (0 at or above the endpoint \code{kv}).

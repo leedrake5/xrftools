@@ -48,6 +48,7 @@
 #' e <- seq(1, 40, 0.05)
 #' plot(e, xrf_tube_spectrum(xrf_tube("Rh", kv = 40), e), type = "l")
 #'
+#' @param discrete_lines If TRUE, return the anode characteristic lines as discrete lines rather than rendered Gaussians (default FALSE).
 xrf_tube_spectrum <- function(tube, energy_kev, takeoff_deg = 40, char_peak_ratio = 100,
                               filter = TRUE, discrete_lines = FALSE) {
   stopifnot(inherits(tube, "xrf_tube"))

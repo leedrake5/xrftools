@@ -10,6 +10,10 @@ xrf_observed_mass(
   detector_type = NULL,
   be_window_um = NULL,
   dead_layer_um = NULL,
+  active_thickness_um = NULL,
+  air_path_cm = NULL,
+  atmosphere = "Air",
+  window = NULL,
   efficiency = TRUE,
   excitation = c("photon", "electron"),
   excitation_weighting = c("cross_section", "jump"),
@@ -20,14 +24,17 @@ xrf_observed_mass(
   incidence_deg = 45,
   takeoff_deg = 45,
   normalization = c("none", "compton", "rayleigh", "scatter"),
-  calibration = NULL
+  calibration = NULL,
+  sensitivity_rel_se = 0
 )
 }
 \arguments{
 \item{object}{A \code{deconvolution_fit} or its \code{peaks} data frame (needs \code{element},
 \code{peak_area}; scatter pseudo-elements are used for \code{normalization} and then dropped).}
 
-\item{beam_energy_kev, detector_type, be_window_um, dead_layer_um, efficiency, excitation, excitation_weighting, coster_kronig, tube}{Passed to \link{xrf_fp_sensitivity} to compute \eqn{S_i}.}
+\item{beam_energy_kev, detector_type, be_window_um, dead_layer_um, active_thickness_um, efficiency, excitation, excitation_weighting, coster_kronig, tube}{Passed to \link{xrf_fp_sensitivity} to compute \eqn{S_i}.}
+
+\item{air_path_cm, atmosphere, window}{Measurement path for the efficiency model: air/He path length (cm), atmosphere ("Air"/"He"/"Vacuum") and an optional snout window; NULL / "Air" reproduce the historical no-path behaviour.}
 
 \item{self_absorption}{"none" (default) returns \eqn{A_i/S_i} (the observed areal mass, where the
 real matrix has cancelled into the per-element sampling depth). "generalized" divides out that
@@ -50,10 +57,18 @@ knowing the matrix). Composes with \code{self_absorption}.}
 \item{calibration}{Optional named vector of per-element response factors (e.g. from
 \link{xrf_calibrate}) to scale the relative values to absolute mass. Must have been fitted with
 the same \code{self_absorption}/\code{matrix}/\code{normalization} settings.}
+
+\item{sensitivity_rel_se}{Optional relative 1-sigma uncertainty on the FP sensitivity \eqn{S_i} (SYSTEMATIC,
+from the atomic constants; e.g. PTB reference-free fundamental-parameter values). A scalar applies to all
+elements; a named numeric vector is per element (unnamed get 0). Folded in quadrature with the statistical
+peak-area error into \code{observed_mass_se}. Default 0 (statistical error only).}
 }
 \value{
 A tibble with \code{element}, \code{primary_energy_kev}, \code{peak_area},
-  \code{sensitivity} and \code{observed_mass} (un-normalized; the sum is diagnostic, not forced).
+  \code{sensitivity}, \code{observed_mass} (un-normalized; the sum is diagnostic, not forced), and
+  \code{observed_mass_se} (first-order standard error propagated from the fit's \code{peak_area_se} as the
+  relative area error times \code{observed_mass}; \code{NA} when unavailable, and treating the sensitivity /
+  matrix / normalization / calibration factors as known).
 }
 \description{
 An alternative to \link{xrf_quantify} that does \strong{not} normalize to a closed sum and can be
@@ -89,4 +104,9 @@ inside the polychromatic excitation integral, leaving an energy-dependent residu
 elements just below a strong exciter (e.g. Cr/V/Ti/Ca under strong Fe K\eqn{\alpha} in Fe-rich
 rocks) read high and track the exciter -- use \link{xrf_quantify} when enhancement matters. (3) It
 assumes a thick, homogeneous sample (thin films / coatings / heterogeneous samples violate this).
+(4) For a counts-per-channel spectrum \code{peak_area} (and hence \code{observed_mass}) scales with the
+energy-axis channel width (\code{observed_mass} \eqn{\propto} rate \eqn{\times} \eqn{\Delta E}), so it is
+\strong{not comparable across MCAs of different gain} -- calibrate (\link{xrf_calibrate}) at the same
+channel width/gain you will apply, exactly as for the other settings. (This cancels in \link{xrf_quantify}'s
+normalized \code{concentration}, which closes to a fixed sum, so only the un-normalized value is affected.)
 }

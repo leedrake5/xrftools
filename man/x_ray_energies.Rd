@@ -14,7 +14,7 @@ x_ray_energies
 Transition energies that may be found in X-Ray spectra and that may be useful in the analysis
 of XRF data. This dataset (from NIST 2018) includes most transition energies
 for all elements. References in the \code{ref} column can be found at the
-\href{NIST X-Ray Transitions Database References}{https://physics.nist.gov/PhysRefData/XrayTrans/Html/refs.html}
+\href{https://physics.nist.gov/PhysRefData/XrayTrans/Html/refs.html}{NIST X-Ray Transitions Database References}
 page. Relative intensities are not available for most transitions, but where they are they are provided
 according to Salem et al. (1974). Similar information is summarised in Kaye and Laby (1995).
 }
@@ -24,10 +24,10 @@ Retrieved August 2018. \url{https://physics.nist.gov/PhysRefData/XrayTrans/Html/
 
 Kaye, G. W. C., and T. H. Laby. Tables of Physical and Chemical Constants and Some Mathematical Functions.
 16th edition. Essex, England; New York: Longman Sc & Tech, 1995. Table 4.2.1:
-\url{http://www.kayelaby.npl.co.uk/atomic_and_nuclear_physics/4_2/4_2_1.html}.
+Kaye and Laby Tables of Physical and Chemical Constants (NPL).
 
 Salem, S.I., S.L. Panossian, and R.A. Krause. "Experimental K and L Relative X-Ray Emission Rates."
 Atomic Data and Nuclear Data Tables 14, no. 2 (August 1974): 91–109.
-\url{https://doi.org/10.1016/S0092-640X(74)80017-3}.
+\doi{10.1016/S0092-640X(74)80017-3}.
 }
 \keyword{datasets}

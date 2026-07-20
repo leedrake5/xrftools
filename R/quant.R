@@ -200,6 +200,7 @@ xrf_compton_normalize <- function(object, by = c("compton", "rayleigh", "scatter
 #' @return A tibble with \code{element}, \code{primary_energy_kev}, and \code{sensitivity}.
 #' @export
 #'
+#' @param air_path_cm,atmosphere,window Measurement path for the efficiency model: air/He path length (cm), atmosphere ("Air"/"He"/"Vacuum") and an optional snout window; NULL / "Air" reproduce the historical no-path behaviour.
 xrf_fp_sensitivity <- function(elements, beam_energy_kev, detector_type = NULL,
                                be_window_um = NULL, dead_layer_um = NULL, active_thickness_um = NULL,
                                air_path_cm = NULL, atmosphere = "Air", window = NULL,
@@ -338,6 +339,7 @@ xrf_fp_sensitivity <- function(elements, beam_energy_kev, detector_type = NULL,
 #'   estimate the area error, and treating the FP model factors + the closure sum as known).
 #' @export
 #'
+#' @param air_path_cm,atmosphere,window Measurement path for the efficiency model: air/He path length (cm), atmosphere ("Air"/"He"/"Vacuum") and an optional snout window; NULL / "Air" reproduce the historical no-path behaviour.
 xrf_quantify <- function(object, beam_energy_kev, detector_type = NULL,
                          be_window_um = NULL, dead_layer_um = NULL, active_thickness_um = NULL,
                          air_path_cm = NULL, atmosphere = "Air", window = NULL,
@@ -659,6 +661,7 @@ xrf_quantify <- function(object, beam_energy_kev, detector_type = NULL,
 #'   matrix / normalization / calibration factors as known).
 #' @export
 #'
+#' @param air_path_cm,atmosphere,window Measurement path for the efficiency model: air/He path length (cm), atmosphere ("Air"/"He"/"Vacuum") and an optional snout window; NULL / "Air" reproduce the historical no-path behaviour.
 xrf_observed_mass <- function(object, beam_energy_kev, detector_type = NULL, be_window_um = NULL,
                               dead_layer_um = NULL, active_thickness_um = NULL,
                               air_path_cm = NULL, atmosphere = "Air", window = NULL, efficiency = TRUE,
@@ -770,7 +773,7 @@ xrf_observed_mass <- function(object, beam_energy_kev, detector_type = NULL, be_
 #' @param values The known reference values, either a list of named numeric vectors (element ->
 #'   value), one per standard, or a data frame with an \code{element} column plus one column per
 #'   standard, or one row per standard with element columns.
-#' @param beam_energy_kev,detector_type,be_window_um,dead_layer_um,active_thickness_um,efficiency,excitation,excitation_weighting,coster_kronig,tube,self_absorption,matrix,incidence_deg,takeoff_deg,normalization
+#' @param beam_energy_kev,detector_type,be_window_um,dead_layer_um,active_thickness_um,air_path_cm,atmosphere,window,efficiency,excitation,excitation_weighting,coster_kronig,tube,self_absorption,matrix,incidence_deg,takeoff_deg,normalization
 #'   Passed to \link{xrf_observed_mass} to compute the observed values for each standard (use the
 #'   settings you will apply to unknowns).
 #' @param weighting Least-squares weighting of the per-element through-origin slope across standards.

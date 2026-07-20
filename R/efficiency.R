@@ -198,6 +198,7 @@ xrf_mass_attenuation <- function(material, energy_kev, type = c("photoelectric",
 #' xrf_detector_efficiency(c(0.5, 6, 30, 60, 100), "SDD")
 #' xrf_detector_efficiency(c(30, 60, 100), "CdTe")   # CdTe stays efficient at high energy
 #'
+#' @param air_path_cm,atmosphere,window Measurement path for the efficiency model: air/He path length (cm), atmosphere ("Air"/"He"/"Vacuum") and an optional snout window; NULL / "Air" reproduce the historical no-path behaviour.
 xrf_detector_efficiency <- function(energy_kev, detector_type = NULL, active_material = NULL,
                                     active_thickness_um = NULL, be_window_um = NULL,
                                     dead_layer_um = NULL,

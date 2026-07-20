@@ -6,3 +6,8 @@
 ^README-.*\.png$
 ^codecov\.yml$
 ^\.github$
+^\.claude$
+^MODERNIZATION_PLAN\.md$
+^TEST_PLAN\.md$
+^PHYSICS_REVIEW.*\.md$
+^ABUNDANCE.*\.md$

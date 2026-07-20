@@ -35,6 +35,12 @@ energy is above the detector's K edge; each is tagged with the parent's \code{el
 when appended to \code{peaks}, it is tied to the same fitted amplitude (no free parameter).
 }
 \details{
+\strong{K-shell escape only.} Only the detector's K X-rays are modelled. For CdTe this means no escape
+is produced below the Cd/Te K edges (~26.7/31.8 keV) -- i.e. across most of its usual working band -- even
+though the Cd/Te \strong{L} X-rays (~3-4.6 keV) can escape there; the escape fraction (and hence the
+\code{full_energy_peak} loss in \link{xrf_detector_efficiency}) is therefore a lower bound for CdTe below
+its K edges. L-escape is negligible for Si/Ge (their L X-rays are absorbed within a few nm).
+
 The escape fraction follows
 \deqn{f = \tfrac{1}{2}\,\omega_K\,(1-1/r)\,[\,1 - (\mu_{esc}/\mu_i)\ln(1 + \mu_i/\mu_{esc})\,]}
 with \eqn{(1-1/r)} the detector K jump ratio, \eqn{\omega_K\cdot}branching supplied by the

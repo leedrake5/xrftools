@@ -37,13 +37,13 @@
 #' D.E. Cullen, et al., "Tables and Graphs of Atomic Subshell and
 #' Relaxation Data Derived from the LLNL Evaluated Atomic Data Library
 #' (EADL), Z = 1 - 100," Lawrence Livermore National Laboratory, UCRL-50400,
-#' Vol. 30, October 1991. \url{http://www-nds.iaea.org/epdl97/libsall.htm}.
+#' Vol. 30, October 1991. \url{https://nds.iaea.org/epdl97/libsall.htm}.
 #'
 #' Coster, D. and Kronig De L. (1935). New type of auger effect and its influence on the x-ray spectrum.
-#' Pysica 2:13-24. \url{https://doi.org/10.1016/S0031-8914(35)90060-X}.
+#' Pysica 2:13-24. \doi{10.1016/S0031-8914(35)90060-X}.
 #'
 #' Veigele, W.J. (1973) Atomic and Nuclear Data Tables 5:51-111. p 54 and 55.
-#' \url{https://doi.org/10.1016/S0092-640X(73)80015-4}.
+#' \doi{10.1016/S0092-640X(73)80015-4}.
 #'
 #' @examples
 #' # absorption jump ratio
@@ -304,7 +304,7 @@ xrf_photoionization_cross_section <- function(element, shell, energy_kev) {
 #' distorted-wave and plane-wave Born approximations. Phys. Rev. A 77, 042701.
 #'
 #' Gryzinski, M. (1965). Classical theory of atomic collisions. I. Theory of inelastic collisions.
-#' Physical Review 138, A336. \url{https://doi.org/10.1103/PhysRev.138.A336}.
+#' Physical Review 138, A336. \doi{10.1103/PhysRev.138.A336}.
 #'
 #' @examples
 #' # at 20 kV the M shells of Au have far higher overvoltage than the L shells
@@ -590,6 +590,7 @@ xrf_relative_peak_intensity <- function(element, shell, trans, beam_energy_kev =
 #' xrf_energies("major", 25)
 #' xrf_energies("major", 20, excitation = "electron", overvoltage_min = 1.5)
 #'
+#' @param m_cascade If TRUE (default), include the M-subshell super-Coster-Kronig cascade (adds heavy-element M lines).
 xrf_energies <- function(elements = "everything", beam_energy_kev = 50, ...,
                          excitation = c("photon", "electron"), overvoltage_min = 1,
                          excitation_weighting = c("cross_section", "jump"),

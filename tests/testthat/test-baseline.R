@@ -6,7 +6,7 @@ test_that("SNIP baseline works as expected", {
   expect_true("baseline" %in% names(spectra_baseline$.spectra[[1]]))
   expect_identical(
     spectra_baseline$.spectra[[1]]$baseline,
-    Peaks::SpectrumBackground(spectra$.spectra[[1]]$cps)
+    xrf_snip_background(spectra$.spectra[[1]]$cps)
   )
 })
 

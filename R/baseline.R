@@ -1,7 +1,42 @@
+#' SNIP background (native, order-2 clipping)
+#'
+#' Statistics-sensitive Non-linear Iterative Peak-clipping (SNIP) baseline. A native, dependency-free
+#' replacement for the (CRAN-archived) \code{Peaks::SpectrumBackground} default (order 2, growing window, no
+#' log-log-sqrt transform): each channel is iteratively clipped to the mean of its two neighbours at a
+#' half-window \eqn{p = 1 \ldots \code{iterations}}, leaving the smooth continuum under the peaks. Reproduces
+#' the reference implementation's output exactly (max abs difference 0 on real spectra).
+#'
+#' @param y Numeric intensity vector.
+#' @param iterations Largest clipping half-window; higher = more conservative (flatter) baseline. Default 100.
+#' @param decreasing If \code{TRUE} the half-window shrinks (\code{iterations..1}) instead of growing. Default FALSE.
+#' @param ... Ignored; tolerates the legacy \code{Peaks} arguments (\code{order}/\code{window}/\code{smoothing}/
+#'   \code{compton}), which the deconvolution never set away from their order-2, no-smoothing defaults.
+#' @return The estimated baseline, same length as \code{y}.
+#' @export
+xrf_snip_background <- function(y, iterations = 100, decreasing = FALSE, ...) {
+  z <- as.numeric(y)
+  n <- length(z)
+  if (n < 3L) return(z)
+  # interpolate any non-finite so the clip does not propagate NA (the reference required finite input)
+  if (anyNA(z) || any(!is.finite(z))) {
+    bad <- !is.finite(z); ok <- which(!bad)
+    if (length(ok) >= 2L) z[bad] <- suppressWarnings(stats::approx(ok, z[ok], xout = which(bad), rule = 2)$y)
+    z[!is.finite(z)] <- 0
+  }
+  iterations <- max(1L, as.integer(iterations))
+  ps <- if (isTRUE(decreasing)) seq.int(iterations, 1L) else seq.int(1L, iterations)
+  for (p in ps) {
+    if (p < 1L || p >= n) next
+    idx <- (p + 1L):(n - p)
+    # vectorised assignment evaluates the RHS against the pre-step z (double-buffered), matching the reference
+    z[idx] <- pmin(z[idx], 0.5 * (z[idx - p] + z[idx + p]))
+  }
+  z
+}
 
 #' Calculate baselines using SNIP
 #'
-#' Based on \link[Peaks]{SpectrumBackground} (Peaks package). The most useful parameter to change is the
+#' A native SNIP baseline (\link{xrf_snip_background}). The most useful parameter to change is the
 #' \code{iterations} argument (higher value will result in a more conservative baseline estimation).
 #'
 #' With \code{energy_aware = TRUE} the SNIP window is warped onto a constant-resolution abscissa built from
@@ -9,9 +44,10 @@
 #' select that model and \strong{default to an SDD (silicon)} when not supplied -- pass the detector you are
 #' actually using (matching the deconvolution) so the warp uses the right resolution curve.
 #'
-#' ... Passed to \link[Peaks]{SpectrumBackground}
+#' ... Passed to \link{xrf_snip_background} (\code{iterations}, \code{decreasing}).
 #' @inheritParams xrf_add_baseline_pkg
 #' @param energy_aware Warp onto the constant-resolution abscissa before SNIP (see Details).
+#' @param .energy_kev Channel energies (keV); used only when \code{energy_aware = TRUE} to build the warp.
 #' @param detector_type,fano,epsilon_ev,noise_fwhm_ev Detector resolution model for the energy-aware warp
 #'   (see \link{xrf_detector_fwhm_ev}); default an SDD.
 #'
@@ -22,16 +58,12 @@ xrf_add_baseline_snip <- function(.spectra, .values = .data$.spectra$cps, ...,
                                   detector_type = NULL, fano = NULL, epsilon_ev = NULL,
                                   noise_fwhm_ev = NULL,
                                   .clamp = -Inf, .env = parent.frame()) {
-  # have to load the Peaks DLLs for some reason
-  .First.lib <- NULL; rm(.First.lib)
-  withr::with_namespace("Peaks", .First.lib(dirname(find.package("Peaks")), "Peaks"))
-
   .values <- enquo(.values)
 
   if (!energy_aware) {
     return(xrf_add_baseline(
       .spectra,
-      Peaks::SpectrumBackground,
+      xrf_snip_background,
       !!.values,
       ...,
       .clamp = .clamp,
@@ -89,7 +121,7 @@ snip_energy_aware <- function(values, energy_kev, ..., detector_type = NULL, fan
   u_uniform <- seq(min(u[finite]), max(u[finite]), length.out = length(u))
   # ties (from any zero-width intervals) are collapsed by approx() -- harmless here
   v_u <- suppressWarnings(stats::approx(u, values, xout = u_uniform, rule = 2))$y
-  bg_u <- Peaks::SpectrumBackground(v_u, ...)
+  bg_u <- xrf_snip_background(v_u, ...)
   suppressWarnings(stats::approx(u_uniform, bg_u, xout = u, rule = 2))$y
 }
 
@@ -168,10 +200,10 @@ xrf_add_baseline <- function(.spectra, .fun, ..., .clamp = -Inf, .env = parent.f
 #' baseline.
 #'
 #' @inheritParams xrf_add_baseline_pkg
-#' @param lambda Smoothness penalty on the second differences of the baseline (larger = smoother, default 1e5).
-#' @param ratio Convergence tolerance on the relative change of the weight vector between iterations
-#'   (default 0.01).
-#' @param max_iter Maximum reweighting iterations (default 50).
+#' @param ... arPLS solver controls, evaluated rowwise and passed to the fit: \code{lambda} (smoothness
+#'   penalty on the baseline's second differences; larger = stiffer / smoother, default 1e5), \code{ratio}
+#'   (convergence tolerance on the relative change of the weight vector between iterations, default 0.01), and
+#'   \code{max_iter} (maximum reweighting iterations, default 50).
 #'
 #' @references
 #' Baek, S.-J., Park, A., Ahn, Y.-J., Choo, J. (2015). Baseline correction using asymmetrically reweighted

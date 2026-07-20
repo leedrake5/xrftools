@@ -9,22 +9,25 @@ xrf_photoionization_cross_section(element, shell, energy_kev)
 \arguments{
 \item{element}{An element symbol or atomic number (vectorized).}
 
-\item{shell}{A subshell ("K", "L1", "L2", "L3", "M1", "M2", "M3").}
+\item{shell}{A subshell ("K", "L1", "L2", "L3", "M1"-"M5").}
 
 \item{energy_kev}{The incident (beam) energy in keV.}
 }
 \value{
-A numeric vector of cross sections (same arbitrary units as \link{x_ray_cross_sections};
-  only ratios within an element are used downstream, so the unit cancels).
+A numeric vector of mass photoionization cross sections in \strong{cm^2/g} (as tabulated in
+  \link{x_ray_cross_sections}). Most callers use only within-element ratios (so the unit would cancel),
+  but the secondary-fluorescence correction in \link{xrf_quantify} forms the cross-section-over-
+  mass-attenuation ratio \eqn{\tau_i(E_j)/\mu(E_j)}, which requires these to be in the SAME cm^2/g units as
+  \link{x_ray_mass_attenuation} -- so the table must stay in cm^2/g (a regeneration in barns would break it).
 }
 \description{
 Interpolates the per-subshell photoelectric cross section from \link{x_ray_cross_sections}
-(K, L1, L2, L3, M1-M3; EPDL97; 5-100 keV grid) at an arbitrary incident energy, using log-log
+(K, L1, L2, L3, M1-M5; EPDL97; ~5 eV to 200 keV grid) at an arbitrary incident energy, using log-log
 interpolation. Below a subshell's absorption edge the tabulated cross section is \code{NA}, so
 this returns \code{NA} for incident energies below the edge (the subshell cannot be ionized).
 Above the tabulated range the cross section is extrapolated as a power law (photoabsorption falls
-roughly as \eqn{E^{-3}} above an edge). Returns \code{NA} for element/shell combinations absent
-from the table (e.g. a K edge above the 100 keV grid, such as U).
+roughly as \eqn{E^{-3}} above an edge). Returns \code{NA} only for element/shell combinations genuinely
+absent from the table (the 200 keV grid covers every element's K edge, U included).
 }
 \examples{
 # Pb K vs L3 excitation strength grows apart with energy

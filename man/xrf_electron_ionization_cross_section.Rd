@@ -56,5 +56,5 @@ Bote, D. & Salvat, F. (2008). Calculations of inner-shell ionization by electron
 distorted-wave and plane-wave Born approximations. Phys. Rev. A 77, 042701.
 
 Gryzinski, M. (1965). Classical theory of atomic collisions. I. Theory of inelastic collisions.
-Physical Review 138, A336. \url{https://doi.org/10.1103/PhysRev.138.A336}.
+Physical Review 138, A336. \doi{10.1103/PhysRev.138.A336}.
 }

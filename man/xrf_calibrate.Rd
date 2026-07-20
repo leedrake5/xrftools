@@ -11,6 +11,10 @@ xrf_calibrate(
   detector_type = NULL,
   be_window_um = NULL,
   dead_layer_um = NULL,
+  active_thickness_um = NULL,
+  air_path_cm = NULL,
+  atmosphere = "Air",
+  window = NULL,
   efficiency = TRUE,
   excitation = c("photon", "electron"),
   excitation_weighting = c("cross_section", "jump"),
@@ -20,7 +24,8 @@ xrf_calibrate(
   matrix = "silicate",
   incidence_deg = 45,
   takeoff_deg = 45,
-  normalization = c("none", "compton", "rayleigh", "scatter")
+  normalization = c("none", "compton", "rayleigh", "scatter"),
+  weighting = c("none", "relative")
 )
 }
 \arguments{
@@ -31,8 +36,13 @@ frame (as accepted by \link{xrf_observed_mass}).}
 value), one per standard, or a data frame with an \code{element} column plus one column per
 standard, or one row per standard with element columns.}
 
-\item{beam_energy_kev, detector_type, be_window_um, dead_layer_um, efficiency, excitation, excitation_weighting, coster_kronig, tube, self_absorption, matrix, incidence_deg, takeoff_deg, normalization}{Passed to \link{xrf_observed_mass} to compute the observed values for each standard (use the
+\item{beam_energy_kev, detector_type, be_window_um, dead_layer_um, active_thickness_um, air_path_cm, atmosphere, window, efficiency, excitation, excitation_weighting, coster_kronig, tube, self_absorption, matrix, incidence_deg, takeoff_deg, normalization}{Passed to \link{xrf_observed_mass} to compute the observed values for each standard (use the
 settings you will apply to unknowns).}
+
+\item{weighting}{Least-squares weighting of the per-element through-origin slope across standards.
+\code{"none"} (default) is the ordinary slope \eqn{\sum o t / \sum o^2} (homoscedastic; dominated by
+the highest-level standard); \code{"relative"} uses inverse-variance weights \eqn{1/o^2} (proportional
+error), i.e. \eqn{k = \mathrm{mean}(t/o)}, so standards spanning orders of magnitude contribute evenly.}
 }
 \value{
 A named numeric vector of per-element calibration factors \eqn{k_i}, with an

@@ -10,7 +10,12 @@ xrf_detector_efficiency(
   active_material = NULL,
   active_thickness_um = NULL,
   be_window_um = NULL,
-  dead_layer_um = NULL
+  dead_layer_um = NULL,
+  air_path_cm = NULL,
+  atmosphere = "Air",
+  window = NULL,
+  full_energy_peak = FALSE,
+  active_absorption = c("photoelectric", "total")
 )
 }
 \arguments{
@@ -24,6 +29,19 @@ geometry.}
 \item{be_window_um}{Beryllium window thickness (microns).}
 
 \item{dead_layer_um}{Dead-layer thickness (microns), assumed to be the active material.}
+
+\item{air_path_cm, atmosphere, window}{Measurement path for the efficiency model: air/He path length (cm), atmosphere ("Air"/"He"/"Vacuum") and an optional snout window; NULL / "Air" reproduce the historical no-path behaviour.}
+
+\item{full_energy_peak}{If TRUE, return the full-energy-(photo)peak fraction, i.e. multiply the active
+term by \eqn{(1 - f_{escape})}. Default FALSE returns the total photoabsorption. See Details.}
+
+\item{active_absorption}{Active-volume absorption model: "photoelectric" (default; single-interaction
+full-peak, a lower bound for thick detectors at high energy) or "total" (any interaction, an upper
+bound assuming full containment). See Details. Note: combining \code{active_absorption = "total"} with
+\code{full_energy_peak = TRUE} is approximate -- the escape correction \eqn{(1-f_{escape})} is derived
+for photoelectric absorption, so applying it to the total (photoelectric + scatter) interaction
+probability over-applies escape to the scatter events; use "photoelectric" for the self-consistent
+full-energy-peak fraction.}
 }
 \value{
 Efficiency in [0, 1], same length as \code{energy_kev}.
@@ -42,6 +60,14 @@ heavy-element K-lines are strongly under-counted); the window and dead-layer ter
 few eV to 200 keV, so the low-energy window absorption (which matters most for light elements) is
 now computed directly rather than extrapolated. Geometry defaults come from the
 \code{detector_type} preset (\link{xrf_detector_presets}); override any of them explicitly.
+}
+\details{
+By default the active-volume term is the total photoabsorption probability. Set
+\code{full_energy_peak = TRUE} to instead return the \strong{full-energy-peak} fraction, i.e.
+multiplied by \eqn{(1 - f_{escape}(E))} where \eqn{f_{escape}} is the detector-fluorescence escape
+probability (\link{xrf_escape_peaks}); this is the quantity that predicts the measured photopeak area
+and is what \link{xrf_fp_sensitivity} uses. The difference is negligible for Si (escape ~1\%) but
+reaches ~10-14\% for Ge/CdTe just above their K edges.
 }
 \examples{
 # thin Si becomes transparent at high energy; a Be window cuts low energy

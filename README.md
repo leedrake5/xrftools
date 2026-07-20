@@ -5,7 +5,7 @@
 
 ![R-CMD-check](https://github.com/paleolimbot/xrftools/workflows/R-CMD-check/badge.svg)
 [![Coverage
-status](https://codecov.io/gh/paleolimbot/xrftools/branch/master/graph/badge.svg)](https://codecov.io/github/paleolimbot/xrftools?branch=master)
+status](https://codecov.io/gh/paleolimbot/xrftools/branch/master/graph/badge.svg)](https://app.codecov.io/github/paleolimbot/xrftools?branch=master)
 
 The goal of xrftools is to provide tools to read, plot, and interpret
 X-Ray fluorescence spectra.
@@ -19,7 +19,7 @@ You can install xrftools from github with:
 remotes::install_github("leedrake5/xrftools")
 ```
 
-Note if you want the origional version of this package, you will want to navigate to [paleolimbot's page](https://www.github.com/paleolimbot/xrftools)
+Note if you want the origional version of this package, you will want to navigate to [paleolimbot's page](https://github.com/paleolimbot/xrftools)
 
 ## Example
 
@@ -64,7 +64,7 @@ energy_kev <- xrf_calibrate_energy(0:2047, gain = 0.02, zero = 0)
 
 ## Baselines
 
-The **xrf** package can use several existing methods for estimating “background” or “baseline” values. The most useful of these for XRF spectra is the Sensitive Nonlinear Iterative Peak (SNIP) method ([Ryan et al. 1988](https://doi.org/10.1016/0168-583X%2888%2990063-8)), implemented in the **Peaks** package. A modern alternative, `xrf_add_baseline_arpls()`, uses asymmetrically reweighted penalized least squares ([Baek et al. 2015](https://doi.org/10.1039/C4AN01061B)) — a single-parameter Whittaker smoother that follows a smooth scatter / Compton continuum more gently than SNIP and needs no channel-window width.
+The **xrf** package can use several existing methods for estimating “background” or “baseline” values. The most useful of these for XRF spectra is the Sensitive Nonlinear Iterative Peak (SNIP) method ([Ryan et al. 1988](https://doi.org/10.1016/0168-583X%2888%2990063-8)), implemented natively (`xrf_snip_background()`). A modern alternative, `xrf_add_baseline_arpls()`, uses asymmetrically reweighted penalized least squares ([Baek et al. 2015](https://doi.org/10.1039/C4AN01061B)) — a single-parameter Whittaker smoother that follows a smooth scatter / Compton continuum more gently than SNIP and needs no channel-window width.
 
 ``` r
 specs %>%

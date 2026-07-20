@@ -10,6 +10,10 @@ xrf_quantify(
   detector_type = NULL,
   be_window_um = NULL,
   dead_layer_um = NULL,
+  active_thickness_um = NULL,
+  air_path_cm = NULL,
+  atmosphere = "Air",
+  window = NULL,
   efficiency = TRUE,
   excitation = c("photon", "electron"),
   excitation_weighting = c("cross_section", "jump"),
@@ -23,7 +27,9 @@ xrf_quantify(
   dark_matrix = NULL,
   oxide = FALSE,
   total = 1,
-  iterations = 12
+  iterations = 12,
+  areal_density = Inf,
+  sensitivity_rel_se = 0
 )
 }
 \arguments{
@@ -32,8 +38,10 @@ xrf_quantify(
 
 \item{beam_energy_kev}{Excitation energy (keV).}
 
-\item{detector_type, be_window_um, dead_layer_um, efficiency, excitation, excitation_weighting, coster_kronig, tube}{Passed to \link{xrf_fp_sensitivity}. Supplying \code{tube = }\link{xrf_tube} integrates the
+\item{detector_type, be_window_um, dead_layer_um, active_thickness_um, efficiency, excitation, excitation_weighting, coster_kronig, tube}{Passed to \link{xrf_fp_sensitivity}. Supplying \code{tube = }\link{xrf_tube} integrates the
 primary excitation over the polychromatic tube spectrum instead of a single energy.}
+
+\item{air_path_cm, atmosphere, window}{Measurement path for the efficiency model: air/He path length (cm), atmosphere ("Air"/"He"/"Vacuum") and an optional snout window; NULL / "Air" reproduce the historical no-path behaviour.}
 
 \item{self_absorption}{Apply the iterative self-absorption correction?}
 
@@ -42,7 +50,12 @@ primary excitation over the polychromatic tube spectrum instead of a single ener
 \item{tertiary_fluorescence}{Add third-order (k -> j -> i chain) enhancement fluorescence
 (implies \code{secondary_fluorescence}). Usually a small (<~1-2\%) correction.}
 
-\item{incidence_deg, takeoff_deg}{Beam incidence / detector take-off angles (degrees).}
+\item{incidence_deg, takeoff_deg}{Beam incidence / detector take-off angles (degrees) for the
+self-absorption path lengths. These are passed as plain scalars -- \code{xrf_quantify} does not read an
+\link{xrf_geometry} object (whose \code{scatter_angle_deg}, used for the Compton shift in the
+deconvolution, is a separate quantity); set them to match your instrument, consistently with the
+\code{scatter_angle_deg} you used for scatter (a common convention is
+\eqn{scatter\_angle \approx 180 - incidence - takeoff}).}
 
 \item{dark_matrix}{Optional named vector of mass fractions of unmeasured matrix elements (e.g.
 \code{c(O = 0.47)}) included in the absorption but not quantified.}
@@ -57,10 +70,26 @@ added to the absorbing matrix, and reported as an \code{"O"} row.}
 \item{total}{Concentrations are scaled to sum to this (1 for mass fraction, 100 for percent).}
 
 \item{iterations}{Self-absorption iterations.}
+
+\item{areal_density}{Sample areal density \eqn{\rho d} (g/cm^2) for a finite-thickness (thin-film /
+coating) self-absorption correction. Default \code{Inf} is an infinitely-thick homogeneous sample
+(the emitted intensity saturates, kernel \eqn{1/A}); a finite value uses \eqn{(1-e^{-A\rho d})/A}
+with \eqn{A=\mu_s(E_0)/\sin\psi_{in}+\mu_s(E_i)/\sin\psi_{out}}, so a thin layer self-absorbs less
+(\eqn{\to \rho d} as \eqn{\rho d \to 0}). Applies to both the monochromatic and polychromatic paths.}
+
+\item{sensitivity_rel_se}{Optional relative 1-sigma uncertainty on the FP sensitivity \eqn{S_i} (the
+SYSTEMATIC error from the atomic constants -- fluorescence yields, cross sections, Coster-Kronig; e.g.
+PTB reference-free fundamental-parameter values). A scalar applies to all elements; a named numeric
+vector is per element (unnamed get 0). Folded in quadrature with the statistical peak-area error into
+\code{concentration_se} / \code{observed_mass_se}. Default 0 (statistical error only).}
 }
 \value{
 A tibble with \code{element}, \code{primary_energy_kev}, \code{peak_area},
-  \code{sensitivity}, and \code{concentration}.
+  \code{sensitivity}, \code{concentration} (normalized, closed to \code{total}),
+  \code{observed_mass} (un-normalized, matrix-corrected \eqn{A_i/(S_i\,\cdot\,\mathrm{selfabs}\,\cdot\,(1+\mathrm{enh}))}),
+  and their standard errors \code{concentration_se}/\code{observed_mass_se} (first-order, propagated from
+  the fit's \code{peak_area_se}: the relative area error times the value; \code{NA} when the fit could not
+  estimate the area error, and treating the FP model factors + the closure sum as known).
 }
 \description{
 Convert deconvolution peak areas to mass fractions using \link{xrf_fp_sensitivity} and, optionally,

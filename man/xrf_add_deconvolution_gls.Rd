@@ -21,6 +21,10 @@ xrf_add_deconvolution_gls(
   escape = FALSE,
   be_window_um = NULL,
   dead_layer_um = NULL,
+  active_thickness_um = NULL,
+  air_path_cm = NULL,
+  atmosphere = "Air",
+  window = NULL,
   nonneg = TRUE,
   weighting = c("auto", "poisson", "none"),
   .counts = NULL,
@@ -29,6 +33,9 @@ xrf_add_deconvolution_gls(
   geometry = NULL,
   scatter = NULL,
   compton_broadening = 2,
+  scatter_continuum = FALSE,
+  scatter_scatterer = "Si",
+  background = 0L,
   tail = 0,
   step = 0,
   beta = NULL,
@@ -38,6 +45,12 @@ xrf_add_deconvolution_gls(
   count_rate = NULL,
   pileup_tau = NULL,
   use_qr = TRUE,
+  abundance_prior = 0,
+  abundance_ref_ppm = 100,
+  abundance_protect = character(0),
+  abundance_ppm = NULL,
+  prior = c("ridge", "lasso", "elastic_net"),
+  enet_alpha = 0.5,
   .env = parent.frame()
 )
 
@@ -56,6 +69,10 @@ xrf_deconvolute_gaussian_least_squares(
   escape = FALSE,
   be_window_um = NULL,
   dead_layer_um = NULL,
+  active_thickness_um = NULL,
+  air_path_cm = NULL,
+  atmosphere = "Air",
+  window = NULL,
   nonneg = TRUE,
   weighting = c("auto", "poisson", "none"),
   counts = NULL,
@@ -64,6 +81,9 @@ xrf_deconvolute_gaussian_least_squares(
   geometry = NULL,
   scatter = NULL,
   compton_broadening = 2,
+  scatter_continuum = FALSE,
+  scatter_scatterer = "Si",
+  background = 0L,
   tail = 0,
   step = 0,
   beta = NULL,
@@ -72,7 +92,13 @@ xrf_deconvolute_gaussian_least_squares(
   sum_peaks = FALSE,
   count_rate = NULL,
   pileup_tau = NULL,
-  use_qr = TRUE
+  use_qr = TRUE,
+  abundance_prior = 0,
+  abundance_ref_ppm = 100,
+  abundance_protect = character(0),
+  abundance_ppm = NULL,
+  prior = c("ridge", "lasso", "elastic_net"),
+  enet_alpha = 0.5
 )
 }
 \arguments{
@@ -105,6 +131,15 @@ parent line's amplitude. Important for Ge/CdTe at high energy.}
 \item{be_window_um, dead_layer_um}{Detector window / dead-layer thickness (microns) for the
 efficiency model; \code{NULL} uses the \code{detector_type} preset.}
 
+\item{active_thickness_um}{Active-volume thickness (microns) for the efficiency model; \code{NULL}
+uses the \code{detector_type} preset (SDD = 450 um, a typical modern silicon-drift detector).
+Governs high-energy transmission (thin Si becomes transparent to heavy-element K lines), so it
+only matters when \code{efficiency = TRUE}.}
+
+\item{air_path_cm, atmosphere, window}{Measurement-path terms for the efficiency model: air/He path length
+(cm), atmosphere (\code{"Air"}/\code{"He"}/\code{"Vacuum"}) and an optional snout window; \code{NULL}/
+\code{"Air"} reproduce the historical no-path behaviour.}
+
 \item{nonneg}{If TRUE (default) coefficients are constrained to be non-negative via
 \link[nnls]{nnls} (peak areas / concentrations cannot be negative). Set FALSE for the classic
 unconstrained least-squares behaviour.}
@@ -124,6 +159,25 @@ enables them when a \code{tube} is supplied; \code{TRUE}/\code{FALSE} force on/o
 
 \item{compton_broadening}{Multiplier on the detector width for the Doppler-broadened Compton
 peak (passed to \link{xrf_scatter_peaks}).}
+
+\item{scatter_continuum}{If TRUE (needs a \code{tube}), also add scattered-\emph{continuum} templates
+(Rayleigh + Compton of the tube bremsstrahlung, \link{xrf_scatter_continuum}) -- the broad scatter
+background / Compton hump that \link{xrf_scatter_peaks} (anode lines only) misses. Default FALSE.
+\strong{Working recipe:} fit against an UN-baselined response (\code{.values = cps}) together with a
+fitted \code{background} (6-12), so the continuum + background REPLACE the SNIP baseline. This recovers
+trace areas cleanly (r^2 = 1 on synthetics; SNIP-only over-estimates traces 100-300\% under a Compton
+hump). Enabling it on the default baseline-subtracted \code{.values = cps - baseline}, or without a
+fitted \code{background}, double-counts the baseline and biases real peaks -- a warning then fires.}
+
+\item{scatter_scatterer}{Representative sample scatterer setting the continuum shape (see
+\link{xrf_scatter_continuum}); default "Si".}
+
+\item{background}{Number of broad, non-negative Gaussian background basis functions to fit jointly with
+the peaks (default 0 = off). When \eqn{\ge 1}, the deconvolution models a smooth background \emph{as
+part of the fit}, so you can feed it an \strong{un-baselined} response (\code{.values = cps}) instead
+of pre-subtracting a SNIP baseline. This is the intended companion to \code{scatter_continuum}: with a
+fitted background there is no subtracted baseline for the broad scatter templates to double-count, so
+real trace areas are preserved. Excluded from quantification. Typical values ~6-12.}
 
 \item{tail, step, beta}{Hypermet line-shape parameters (passed to \link{xrf_lineshape}): relative
 low-energy tail amplitude, shelf/step amplitude, and tail decay length. Defaults (0, 0, NULL)
@@ -151,6 +205,45 @@ this supersedes the free-amplitude \code{sum_peaks} model.}
 \item{use_qr}{If TRUE (default) unconstrained fits (\code{nonneg = FALSE}) use fast QR
 decomposition; set FALSE for fork-safe \code{lm()} under multicore parallelism. Ignored when
 \code{nonneg = TRUE}.}
+
+\item{abundance_prior}{Strength of an optional crustal-abundance ridge prior (default 0 = off, an
+identical fit). When > 0, each element template is shrunk with a penalty proportional to
+\code{abundance_ref_ppm}/(crustal abundance), \strong{gated} by a variance-inflation-factor
+identifiability weight so only columns that are \emph{both} rare \emph{and} not separately estimable
+are penalised (\link{x_ray_xrf_energies}; see \code{R/abundance.R}). This resolves degenerate
+overlaps (e.g. a rare element's lines coinciding with an abundant one's) toward the more abundant
+element. Typical useful strengths are ~0.1-0.5. \strong{Caveat:} it is a biasing prior -- a
+genuinely-present but truly-unresolvable trace that overlaps a common line can be shrunk low, so leave
+it at 0 for the most defensible trace quantification and raise it only to suppress phantom peaks.}
+
+\item{abundance_ref_ppm}{Pivot abundance (ppm) at which the abundance penalty factor equals 1 (default
+100); elements rarer than this get a larger penalty factor, more abundant ones a smaller one. Only
+used when \code{abundance_prior > 0}.}
+
+\item{abundance_protect}{Character vector of element symbols to \strong{exempt} from the abundance prior
+(never penalised). Use it to protect elements you know are present -- in particular heavy elements read
+via L-lines that overlap an abundant K-line or the scatter peak (Pb L\eqn{\alpha} under As K\eqn{\alpha},
+U L\eqn{\gamma} under the Rayleigh line), which the VIF gate would otherwise read as unidentifiable and
+crush. Protecting them makes the tiebreaker explicit: at each coincidence the prior penalises only the
+rare unprotected competitor, so the shared intensity flows to the protected element while phantoms are
+still removed. Default none. Only used when \code{abundance_prior > 0}.}
+
+\item{abundance_ppm}{Optional named numeric vector of per-element abundances (ppm by mass) that
+\strong{override} the built-in crustal reference for the named elements -- e.g. a known matrix
+\code{c(Fe = 7e5, Cr = 1.8e5, Ni = 8e4)} so its major/known elements are not treated as "rare" and
+penalised. Elements not named keep their crustal default. Only used when \code{abundance_prior > 0}.}
+
+\item{prior}{Form of the abundance penalty: \code{"ridge"} (default, L2 Tikhonov, legacy behaviour),
+\code{"lasso"} (L1) or \code{"elastic_net"} (an L1/L2 mix, \code{enet_alpha}). All three reuse the same
+VIF / clean-line / \code{abundance_protect} gating and the same \code{abundance_prior} strength; the L1
+forms are realised by iteratively reweighted L2 (a majorize-minimize scheme, no extra dependency) and
+snap penalised-and-shrunken columns to \strong{exactly} zero. \strong{Note:} under the default
+non-negativity, NNLS already zeros clearly-absent elements, so the L1 forms differ from the ridge mainly
+(a) in the unconstrained \code{nonneg = FALSE} fit (where they zero what least squares would leave
+non-zero) and (b) by removing confounded rare columns more aggressively.}
+
+\item{enet_alpha}{Elastic-net mixing in [0,1] for \code{prior = "elastic_net"} (1 = lasso, 0 = ridge-like);
+default 0.5. Ignored otherwise.}
 
 \item{.env}{Calling environment}
 

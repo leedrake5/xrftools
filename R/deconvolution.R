@@ -26,6 +26,9 @@
 #'   uses the \code{detector_type} preset (SDD = 450 um, a typical modern silicon-drift detector).
 #'   Governs high-energy transmission (thin Si becomes transparent to heavy-element K lines), so it
 #'   only matters when \code{efficiency = TRUE}.
+#' @param air_path_cm,atmosphere,window Measurement-path terms for the efficiency model: air/He path length
+#'   (cm), atmosphere (\code{"Air"}/\code{"He"}/\code{"Vacuum"}) and an optional snout window; \code{NULL}/
+#'   \code{"Air"} reproduce the historical no-path behaviour.
 #' @param nonneg If TRUE (default) coefficients are constrained to be non-negative via
 #'   \link[nnls]{nnls} (peak areas / concentrations cannot be negative). Set FALSE for the classic
 #'   unconstrained least-squares behaviour.

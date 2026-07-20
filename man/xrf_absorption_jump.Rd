@@ -21,7 +21,7 @@ xrf_coster_kronig_probability(
   element,
   shell,
   coster_kronig_trans,
-  method = "EADL97"
+  method = getOption("xrftools.ck_source", "EADL97")
 )
 
 xrf_relative_peak_intensity(
@@ -31,7 +31,8 @@ xrf_relative_peak_intensity(
   beam_energy_kev = 50,
   excitation_weighting = c("cross_section", "jump"),
   coster_kronig = TRUE,
-  excitation = c("photon", "electron")
+  excitation = c("photon", "electron"),
+  m_cascade = TRUE
 )
 }
 \arguments{
@@ -50,12 +51,27 @@ and EADL97 tables are used for other parameters.}
 should be incorporated into the calculation.}
 
 \item{excitation_weighting}{How to weight the primary vacancy production per subshell.
-"cross_section" (default) uses the energy-dependent partial photoionization cross section
-\eqn{\sigma_{shell}(E_0)} from \link{xrf_photoionization_cross_section} at
-\code{beam_energy_kev}, so the K:L branching correctly depends on the beam energy; it falls
-back to the (energy-independent) absorption-jump ratio only where the cross section is
-unavailable. "jump" uses the absorption-jump ratio everywhere (the classic, beam-independent
-behaviour).}
+  "cross_section" (default) uses the energy-dependent partial photoionization cross section
+  \eqn{\sigma_{shell}(E_0)} from \link{xrf_photoionization_cross_section} at
+  \code{beam_energy_kev}, so the K:L branching correctly depends on the beam energy; it falls
+  back to the (energy-independent) absorption-jump ratio only where the cross section is
+  unavailable. "jump" uses the absorption-jump ratio everywhere (the classic, beam-independent
+  behaviour).
+
+  \strong{Limitations of "jump" mode.} The jump factor \eqn{(r-1)/r} is the fraction of the
+  photoabsorption captured by a subshell \emph{just above its own edge}, evaluated at each shell's
+  edge -- \strong{not} the cross-shell (K:L) vacancy-production ratio at a common beam energy. So
+  in wide-energy XRF where both series are excited, "jump" gives K:L intensity ratios that can be
+  ~10x off (e.g. Pb K\eqn{\alpha}:L\eqn{\alpha} at 90 keV is ~2 in jump mode vs ~15 with the
+  physical cross sections); prefer "cross_section" whenever cross-shell ratios matter. Also, the
+  Veigele jump-ratio coefficients only cover K/L1/L2/L3, so "jump" returns \code{NA} (and
+  \link{xrf_energies} silently drops) all \strong{M-shell} lines -- an M-only element (e.g. a heavy
+  element excited below its L edges) yields no lines in "jump" mode. Use "cross_section" (which has
+  M1-M3 cross sections) or \code{excitation = "electron"} (Bote-Salvat, full M series) for M lines.
+  (Note: the M4/M5 subshells have tabulated photoionization cross sections, so their
+  M\eqn{\alpha}/M\eqn{\beta} lines ARE produced in "cross_section" photon mode -- but only weakly, and
+  without \code{m_cascade} they usually fall below the per-element intensity threshold and are dropped by
+  \link{xrf_energies}; the default \code{m_cascade = TRUE} adds the M super-Coster-Kronig boost.)}
 
 \item{coster_kronig}{If TRUE (default) redistribute L1/L2 vacancies down the L subshells via
 Coster-Kronig transfer (\link{x_ray_coster_kronig_probabilities}) before radiative decay,
@@ -65,6 +81,13 @@ correcting the relative intensities of the L family for heavier elements.}
 photoionization cross section (or jump ratio); "electron" (SEM-EDS) uses the electron-impact
 ionization cross section \link{xrf_electron_ionization_cross_section} instead, so the M series
 of heavy elements is correctly enhanced at low beam energy.}
+
+\item{m_cascade}{If TRUE (default), apply an M-subshell super-Coster-Kronig cascade (analogous to
+\code{coster_kronig} for the L shells). This transfers M1-M3 vacancy production down to M4/M5
+\strong{on top of their direct photoionization}, boosting the M\eqn{\alpha}/M\eqn{\beta} lines of the
+M4/M5 subshells ~4x -- without it those lines are produced but usually too weak to clear the per-element
+intensity threshold (so \link{xrf_energies} drops them). Set \code{m_cascade = FALSE} for the legacy
+behaviour that omitted the M4/M5 cascade.}
 }
 \value{
 A vector of numerics
@@ -104,11 +127,11 @@ xrf_absorption_jump_ratio("Pb", c("K", "L1", "L2", "L3"))
 D.E. Cullen, et al., "Tables and Graphs of Atomic Subshell and
 Relaxation Data Derived from the LLNL Evaluated Atomic Data Library
 (EADL), Z = 1 - 100," Lawrence Livermore National Laboratory, UCRL-50400,
-Vol. 30, October 1991. \url{http://www-nds.iaea.org/epdl97/libsall.htm}.
+Vol. 30, October 1991. \url{https://nds.iaea.org/epdl97/libsall.htm}.
 
 Coster, D. and Kronig De L. (1935). New type of auger effect and its influence on the x-ray spectrum.
-Pysica 2:13-24. \url{https://doi.org/10.1016/S0031-8914(35)90060-X}.
+Pysica 2:13-24. \doi{10.1016/S0031-8914(35)90060-X}.
 
 Veigele, W.J. (1973) Atomic and Nuclear Data Tables 5:51-111. p 54 and 55.
-\url{https://doi.org/10.1016/S0092-640X(73)80015-4}.
+\doi{10.1016/S0092-640X(73)80015-4}.
 }

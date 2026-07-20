@@ -18,7 +18,7 @@ An object of class \code{tbl_df} (inherits from \code{tbl}, \code{data.frame}) w
 }
 \source{
 The PyMca5 python package (\url{https://pypi.org/project/PyMca5/#files}),
-which obtained the data from the EADL page (\url{http://www-nds.iaea.org/epdl97/libsall.htm})
+which obtained the data from the EADL page (\url{https://nds.iaea.org/epdl97/libsall.htm})
 }
 \usage{
 x_ray_cross_sections

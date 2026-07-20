@@ -12,6 +12,7 @@ xrf_energies(
   overvoltage_min = 1,
   excitation_weighting = c("cross_section", "jump"),
   coster_kronig = TRUE,
+  m_cascade = TRUE,
   min_relative_intensity = 0.01
 )
 }
@@ -38,6 +39,8 @@ enhanced at low beam energy.}
 \item{excitation_weighting, coster_kronig}{Passed to \link{xrf_relative_peak_intensity}: how to
 weight subshell vacancy production ("cross_section", the energy-dependent default, or "jump"),
 and whether to apply the Coster-Kronig L-subshell cascade.}
+
+\item{m_cascade}{If TRUE (default), include the M-subshell super-Coster-Kronig cascade (adds heavy-element M lines).}
 
 \item{min_relative_intensity}{Smallest peak to include, relative to the maximum peak for a given
 element.}

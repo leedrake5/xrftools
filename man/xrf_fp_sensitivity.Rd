@@ -10,6 +10,10 @@ xrf_fp_sensitivity(
   detector_type = NULL,
   be_window_um = NULL,
   dead_layer_um = NULL,
+  active_thickness_um = NULL,
+  air_path_cm = NULL,
+  atmosphere = "Air",
+  window = NULL,
   efficiency = TRUE,
   excitation = c("photon", "electron"),
   excitation_weighting = c("cross_section", "jump"),
@@ -22,8 +26,10 @@ xrf_fp_sensitivity(
 
 \item{beam_energy_kev}{Excitation energy (keV).}
 
-\item{detector_type, be_window_um, dead_layer_um}{Detector parameters for the efficiency term
+\item{detector_type, be_window_um, dead_layer_um, active_thickness_um}{Detector parameters for the efficiency term
 (see \link{xrf_detector_efficiency}); \code{efficiency = FALSE} omits it.}
+
+\item{air_path_cm, atmosphere, window}{Measurement path for the efficiency model: air/He path length (cm), atmosphere ("Air"/"He"/"Vacuum") and an optional snout window; NULL / "Air" reproduce the historical no-path behaviour.}
 
 \item{efficiency}{Include the detector-efficiency term?}
 

@@ -16,3 +16,6 @@ PHYSICS_REVIEW_2026-07-17.md
 MODERNIZATION_PLAN.md
 TEST_PLAN.md
 /tests/testthat
+/xrftools.Rcheck
+/..Rcheck
+.Rbuildignore
