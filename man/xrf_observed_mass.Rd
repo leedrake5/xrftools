@@ -18,6 +18,7 @@ xrf_observed_mass(
   excitation = c("photon", "electron"),
   excitation_weighting = c("cross_section", "jump"),
   coster_kronig = TRUE,
+  m_cascade = TRUE,
   tube = NULL,
   self_absorption = c("none", "generalized"),
   matrix = "silicate",
@@ -30,9 +31,12 @@ xrf_observed_mass(
 }
 \arguments{
 \item{object}{A \code{deconvolution_fit} or its \code{peaks} data frame (needs \code{element},
-\code{peak_area}; scatter pseudo-elements are used for \code{normalization} and then dropped).}
+\code{peak_area}; scatter pseudo-elements are used for \code{normalization} and then dropped).
+A \code{primary_energy_kev} column, when present, pins each element's sensitivity to the fitted
+line (see \link{xrf_fp_sensitivity}; this keeps the area/sensitivity pairing consistent under a
+polychromatic \code{tube}).}
 
-\item{beam_energy_kev, detector_type, be_window_um, dead_layer_um, active_thickness_um, efficiency, excitation, excitation_weighting, coster_kronig, tube}{Passed to \link{xrf_fp_sensitivity} to compute \eqn{S_i}.}
+\item{beam_energy_kev, detector_type, be_window_um, dead_layer_um, active_thickness_um, efficiency, excitation, excitation_weighting, coster_kronig, m_cascade, tube}{Passed to \link{xrf_fp_sensitivity} to compute \eqn{S_i}.}
 
 \item{air_path_cm, atmosphere, window}{Measurement path for the efficiency model: air/He path length (cm), atmosphere ("Air"/"He"/"Vacuum") and an optional snout window; NULL / "Air" reproduce the historical no-path behaviour.}
 

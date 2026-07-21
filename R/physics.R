@@ -200,26 +200,27 @@ xrf_photoionization_cross_section <- function(element, shell, energy_kev) {
 
   key <- paste(element, shell, sep = ":")
   out <- rep(NA_real_, n)
-  for (k in unique(key)) {
+  idx_split <- split(seq_len(n), key)   # one C-level pass, vs a which() scan per unique key
+  for (k in names(idx_split)) {
     g <- .xrf_cache$cross_section_split[[k]]
     if (is.null(g) || nrow(g) == 0) next
-    idx <- which(key == k)
+    idx <- idx_split[[k]]
     e0 <- energy_kev[idx]
-    lo <- min(g$energy_kev)
-    hi <- max(g$energy_kev)
+    lo <- g$energy_kev[1]
+    hi <- g$energy_kev[nrow(g)]
     v <- rep(NA_real_, length(e0))           # below the edge (below lo) stays NA
 
     within <- is.finite(e0) & e0 >= lo & e0 <= hi
     if (any(within)) {
-      v[within] <- exp(suppressWarnings(   # edge-doubled EPDL grid points are collapsed by approx()
-        stats::approx(log(g$energy_kev), log(g$cross_section), xout = log(e0[within]))$y))
+      # grids are duplicate-free and pre-logged at cache build (.xrf_collapse_loglog), so the fast
+      # ties = "ordered" path applies (the default ties handling runs tapply/mean on every call)
+      v[within] <- exp(stats::approx(g$loge, g$logv, xout = log(e0[within]), ties = "ordered")$y)
     }
     above <- is.finite(e0) & e0 > hi
     if (any(above) && nrow(g) >= 2) {
       m <- nrow(g)                            # power-law (log-log) extrapolation beyond the grid
-      slope <- (log(g$cross_section[m]) - log(g$cross_section[m - 1])) /
-        (log(g$energy_kev[m]) - log(g$energy_kev[m - 1]))
-      v[above] <- exp(log(g$cross_section[m]) + slope * (log(e0[above]) - log(g$energy_kev[m])))
+      slope <- (g$logv[m] - g$logv[m - 1]) / (g$loge[m] - g$loge[m - 1])
+      v[above] <- exp(g$logv[m] + slope * (log(e0[above]) - g$loge[m]))
     }
     out[idx] <- v
   }
@@ -347,6 +348,14 @@ xrf_electron_ionization_cross_section <- function(element, shell, beam_energy_ke
   q
 }
 
+
+# Fast base-R stand-ins for dplyr::coalesce on numeric vectors. These sit on paths called thousands
+# of times per quantification (every CK/M-cascade lookup, every shell-production call); coalesce's
+# per-call type dispatch showed up at ~40% of total batch time in profiling. Non-finite (NA here in
+# practice) entries are replaced by 0 / by the fallback vector's entries.
+.xrf_na0 <- function(x) { x[!is.finite(x)] <- 0; x }
+.xrf_nafill <- function(x, alt) { i <- !is.finite(x); x[i] <- alt[i]; x }
+
 # Redistribute primary L-subshell vacancies via Coster-Kronig transfer before radiative decay.
 # Given per-row primary vacancy factors for L1/L2/L3 (nL1/nL2/nL3), returns the *effective* vacancy
 # factor for each row's shell (L rows get the cascaded value; non-L rows are returned unchanged).
@@ -354,9 +363,9 @@ xrf_electron_ionization_cross_section <- function(element, shell, beam_energy_ke
 # L1 is NOT depleted here; the transferred vacancies are simply *added* to L2/L3:
 #   V1_eff = nL1;  V2_eff = nL2 + f12*nL1;  V3_eff = nL3 + f23*V2_eff + f13*nL1.
 .xrf_ck_cascade <- function(element, shell, n_row, nL1, nL2, nL3) {
-  f12 <- dplyr::coalesce(xrf_coster_kronig_probability(element, "L1", "f12"), 0)
-  f13 <- dplyr::coalesce(xrf_coster_kronig_probability(element, "L1", "f13"), 0)
-  f23 <- dplyr::coalesce(xrf_coster_kronig_probability(element, "L2", "f23"), 0)
+  f12 <- .xrf_na0(xrf_coster_kronig_probability(element, "L1", "f12"))
+  f13 <- .xrf_na0(xrf_coster_kronig_probability(element, "L1", "f13"))
+  f23 <- .xrf_na0(xrf_coster_kronig_probability(element, "L2", "f23"))
   V1 <- nL1
   V2 <- nL2 + f12 * nL1
   V3 <- nL3 + f23 * V2 + f13 * nL1
@@ -374,7 +383,7 @@ xrf_electron_ionization_cross_section <- function(element, shell, beam_energy_ke
 # ADDS the super-CK vacancies transferred from M1-M3 on top (both channels are physical and additive),
 # boosting M4/M5 ~4x so they clear the per-element intensity threshold. Non-M rows are returned unchanged.
 .xrf_m_cascade <- function(element, shell, n_row, nM1, nM2, nM3, nM4, nM5) {
-  f <- function(src, tr) dplyr::coalesce(xrf_coster_kronig_probability(element, src, tr), 0)
+  f <- function(src, tr) .xrf_na0(xrf_coster_kronig_probability(element, src, tr))
   V1 <- nM1
   V2 <- nM2 + f("M1", "f12") * V1
   V3 <- nM3 + f("M1", "f13") * V1 + f("M2", "f23") * V2
@@ -415,9 +424,9 @@ xrf_electron_ionization_cross_section <- function(element, shell, beam_energy_ke
   if (isTRUE(coster_kronig)) {
     sig <- .xrf_ck_cascade(
       element, shell, sig,
-      dplyr::coalesce(xrf_photoionization_cross_section(element, "L1", energy_kev), 0),
-      dplyr::coalesce(xrf_photoionization_cross_section(element, "L2", energy_kev), 0),
-      dplyr::coalesce(xrf_photoionization_cross_section(element, "L3", energy_kev), 0)
+      .xrf_na0(xrf_photoionization_cross_section(element, "L1", energy_kev)),
+      .xrf_na0(xrf_photoionization_cross_section(element, "L2", energy_kev)),
+      .xrf_na0(xrf_photoionization_cross_section(element, "L3", energy_kev))
     )
   }
   sig
@@ -530,9 +539,10 @@ xrf_relative_peak_intensity <- function(element, shell, trans, beam_energy_kev =
       )
     }
   } else {
-    # K/M rows: fall back to the jump ratio only where sigma is unavailable (e.g. a K edge above
-    # the 100 keV table). Below-edge rows are removed downstream by the edge cut in xrf_energies().
-    n_shell <- dplyr::coalesce(
+    # K/M rows: fall back to the jump ratio only where sigma is unavailable (a shell/element pair
+    # genuinely absent from the table; the 200 keV EPDL grid covers every K edge, U included).
+    # Below-edge rows are removed downstream by the edge cut in xrf_energies().
+    n_shell <- .xrf_nafill(
       xrf_photoionization_cross_section(element, shell, beam_energy_kev), jr
     )
     if (coster_kronig) {
@@ -540,9 +550,9 @@ xrf_relative_peak_intensity <- function(element, shell, trans, beam_energy_kev =
       # beam energy contributes no Coster-Kronig transfer.
       v_eff <- .xrf_ck_cascade(
         element, shell, n_shell,
-        dplyr::coalesce(xrf_photoionization_cross_section(element, "L1", beam_energy_kev), 0),
-        dplyr::coalesce(xrf_photoionization_cross_section(element, "L2", beam_energy_kev), 0),
-        dplyr::coalesce(xrf_photoionization_cross_section(element, "L3", beam_energy_kev), 0)
+        .xrf_na0(xrf_photoionization_cross_section(element, "L1", beam_energy_kev)),
+        .xrf_na0(xrf_photoionization_cross_section(element, "L2", beam_energy_kev)),
+        .xrf_na0(xrf_photoionization_cross_section(element, "L3", beam_energy_kev))
       )
       is_l <- shell %in% c("L1", "L2", "L3")
       n_shell <- ifelse(is_l, v_eff, n_shell)
@@ -552,7 +562,7 @@ xrf_relative_peak_intensity <- function(element, shell, trans, beam_energy_kev =
   if (m_cascade) {
     # M super-Coster-Kronig cascade (opt-in): adds the super-CK transfer from M1-M3 to the M4/M5 subshells
     # (on top of their direct photoionization), boosting their Malpha/Mbeta lines so they clear threshold.
-    mp <- function(sh) dplyr::coalesce(xrf_photoionization_cross_section(element, sh, beam_energy_kev), 0)
+    mp <- function(sh) .xrf_na0(xrf_photoionization_cross_section(element, sh, beam_energy_kev))
     v_m <- .xrf_m_cascade(element, shell, n_shell, mp("M1"), mp("M2"), mp("M3"), mp("M4"), mp("M5"))
     is_m <- shell %in% c("M1", "M2", "M3", "M4", "M5")
     n_shell <- ifelse(is_m, v_m, n_shell)
@@ -603,7 +613,25 @@ xrf_energies <- function(elements = "everything", beam_energy_kev = 50, ...,
   # line-selection cut: photon keeps edge <= beam; electron keeps overvoltage U = beam/edge >= U_min
   edge_cut <- if (excitation == "electron") beam_energy_kev / overvoltage_min else beam_energy_kev
 
-  xrftools::x_ray_xrf_energies %>%
+  # Last-call result cache. The deconvolution's default `peaks = xrf_energies()` is a tidy-quoted
+  # default re-evaluated for EVERY spectrum of a batch, and xrf_scatter_peaks / xrf_infer_scatter_
+  # geometry call this per fit -- all usually with identical arguments. Extra `...` filters are
+  # data-masked expressions and so uncacheable; those calls always recompute.
+  no_dots <- ...length() == 0L
+  if (no_dots) {
+    key <- list(sort(elements), beam_energy_kev, excitation, overvoltage_min, excitation_weighting,
+                coster_kronig, m_cascade, min_relative_intensity,
+                getOption("xrftools.ck_source", "EADL97"))
+    hit <- .xrf_kv_get(.xrf_energies_store, key)
+    if (!is.null(hit)) return(hit)
+  }
+
+  out <- xrftools::x_ray_xrf_energies %>%
+    # Restrict to the requested elements BEFORE the intensity computation: the per-element
+    # normalization and intensity cull never look across elements, so this is exact -- and it makes
+    # single-element calls (every tube/scatter internal use) ~50x cheaper than computing intensities
+    # for the whole table and discarding all but one element.
+    dplyr::filter(.data$element %in% !!elements) %>%
     dplyr::mutate(
       relative_peak_intensity = xrf_relative_peak_intensity(
         .data$element, .data$edge, .data$trans, !!beam_energy_kev,
@@ -623,11 +651,13 @@ xrf_energies <- function(elements = "everything", beam_energy_kev = 50, ...,
     # (e.g. beam_energy_kev = 0): max() of an empty group would warn; the result is an empty frame.
     dplyr::mutate(relative_peak_intensity = .data$relative_peak_intensity / suppressWarnings(max(.data$relative_peak_intensity))) %>%
     dplyr::filter(
-      .data$element %in% !!elements,
       .data$relative_peak_intensity >= min_relative_intensity,
       ...
     ) %>%
     dplyr::ungroup() %>%
     dplyr::arrange(.data$z, dplyr::desc(.data$relative_peak_intensity)) %>%
     dplyr::select("element", "trans", "trans_siegbahn", "energy_kev", "relative_peak_intensity", dplyr::everything())
+
+  if (no_dots) .xrf_kv_put(.xrf_energies_store, key, out)
+  out
 }

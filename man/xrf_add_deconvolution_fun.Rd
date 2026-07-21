@@ -4,7 +4,13 @@
 \alias{xrf_add_deconvolution_fun}
 \title{Add a deconvolution based on a function}
 \usage{
-xrf_add_deconvolution_fun(.spectra, .fun, ..., .env = parent.frame())
+xrf_add_deconvolution_fun(
+  .spectra,
+  .fun,
+  ...,
+  .cores = 1L,
+  .env = parent.frame()
+)
 }
 \arguments{
 \item{.spectra}{A \link{xrf_spectra} tibble.}
@@ -12,6 +18,12 @@ xrf_add_deconvolution_fun(.spectra, .fun, ..., .env = parent.frame())
 \item{.fun}{A function that}
 
 \item{...}{Passed to .fun}
+
+\item{.cores}{Number of processes for the per-spectrum map (default 1 = serial). Values > 1 use
+\code{parallel::mclapply} (fork-based; on Windows this silently runs serially). Forked workers
+inherit -- but cannot write back to -- the template/line/sensitivity caches, so for best scaling
+on a repetitive batch, run one spectrum per beam condition first to warm the caches, then the
+rest in parallel.}
 
 \item{.env}{Calling environment}
 }

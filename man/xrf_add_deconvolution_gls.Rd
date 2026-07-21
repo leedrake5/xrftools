@@ -51,6 +51,7 @@ xrf_add_deconvolution_gls(
   abundance_ppm = NULL,
   prior = c("ridge", "lasso", "elastic_net"),
   enet_alpha = 0.5,
+  .cores = 1L,
   .env = parent.frame()
 )
 
@@ -169,8 +170,9 @@ trace areas cleanly (r^2 = 1 on synthetics; SNIP-only over-estimates traces 100-
 hump). Enabling it on the default baseline-subtracted \code{.values = cps - baseline}, or without a
 fitted \code{background}, double-counts the baseline and biases real peaks -- a warning then fires.}
 
-\item{scatter_scatterer}{Representative sample scatterer setting the continuum shape (see
-\link{xrf_scatter_continuum}); default "Si".}
+\item{scatter_scatterer}{Representative sample scatterer weighting both the anode-line scatter
+templates (\link{xrf_scatter_peaks}) and the scattered-continuum shape
+(\link{xrf_scatter_continuum}); default "Si".}
 
 \item{background}{Number of broad, non-negative Gaussian background basis functions to fit jointly with
 the peaks (default 0 = off). When \eqn{\ge 1}, the deconvolution models a smooth background \emph{as
@@ -199,8 +201,14 @@ skipped. Reserved for scaling the pile-up contribution.}
 
 \item{pileup_tau}{Optional detector pulse-pair resolution time (seconds). When supplied with
 \code{counts}/\code{.counts} and \code{livetime}/\code{.livetime}, a physically-constrained
-two-pass pile-up correction is applied (coincidence peak areas fixed to \eqn{2\tau/T\,A_iA_j});
-this supersedes the free-amplitude \code{sum_peaks} model.}
+two-pass pile-up correction is applied: coincidence peaks with areas fixed to
+\eqn{2\tau A_i A_j/\Delta E} (\eqn{\Delta E} the channel width; live time cancels in rate space)
+are subtracted and the elements refitted, and the reported \code{height}/\code{peak_area} (and
+SEs/covariances) of all non-pileup templates are then multiplied by \eqn{e^{2\tau R_{tot}}}
+(\eqn{R_{tot}} the gross count rate) to restore the counts each line lost \emph{to} pile-up --
+a uniform factor, so ratios are unchanged but absolute quantities
+(\link{xrf_observed_mass}, calibrated results) are corrected. \code{response}/\code{components}
+stay in measured (piled-up) space. This supersedes the free-amplitude \code{sum_peaks} model.}
 
 \item{use_qr}{If TRUE (default) unconstrained fits (\code{nonneg = FALSE}) use fast QR
 decomposition; set FALSE for fork-safe \code{lm()} under multicore parallelism. Ignored when
@@ -244,6 +252,12 @@ non-zero) and (b) by removing confounded rare columns more aggressively.}
 
 \item{enet_alpha}{Elastic-net mixing in [0,1] for \code{prior = "elastic_net"} (1 = lasso, 0 = ridge-like);
 default 0.5. Ignored otherwise.}
+
+\item{.cores}{Number of processes for the per-spectrum map (default 1 = serial). Values > 1 use
+\code{parallel::mclapply} (fork-based; on Windows this silently runs serially). Forked workers
+inherit -- but cannot write back to -- the template/line/sensitivity caches, so for best scaling
+on a repetitive batch, run one spectrum per beam condition first to warm the caches, then the
+rest in parallel.}
 
 \item{.env}{Calling environment}
 

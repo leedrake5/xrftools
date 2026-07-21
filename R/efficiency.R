@@ -46,23 +46,25 @@
 # log-log interpolate a single element's mu/rho grid (photoelectric or total), with flat-clamp below
 # the grid and power-law extrapolation above it. The EPDL grid runs from ~5 eV to 200 keV, so the
 # clamp/extrapolation are essentially never reached for real analytical lines (sub-keV light-element
-# lines are interpolated directly from tabulated values, not extrapolated).
+# lines are interpolated directly from tabulated values, not extrapolated). Grids are duplicate-free
+# and pre-logged at cache build (.xrf_collapse_loglog), so approx() takes the fast ties = "ordered"
+# path instead of collapsing edge-doubled points with tapply/mean on every call.
 .xrf_interp_mu <- function(g, energy_kev) {
   if (is.null(g) || nrow(g) < 2) return(rep(NA_real_, length(energy_kev)))
-  lo <- min(g$energy_kev); hi <- max(g$energy_kev); m <- nrow(g)
+  m <- nrow(g)
+  lo <- g$energy_kev[1]; hi <- g$energy_kev[m]
   e <- energy_kev
   out <- rep(NA_real_, length(e))
   within <- is.finite(e) & e >= lo & e <= hi
   if (any(within)) {
-    out[within] <- exp(suppressWarnings(   # edge-doubled grid points are collapsed by approx()
-      stats::approx(log(g$energy_kev), log(g$mu), log(e[within]))$y))
+    out[within] <- exp(stats::approx(g$loge, g$logv, log(e[within]), ties = "ordered")$y)
   }
   below <- is.finite(e) & e < lo
-  if (any(below)) out[below] <- g$mu[1]
+  if (any(below)) out[below] <- g$value[1]
   above <- is.finite(e) & e > hi
   if (any(above)) {
-    slope <- (log(g$mu[m]) - log(g$mu[m - 1])) / (log(g$energy_kev[m]) - log(g$energy_kev[m - 1]))
-    out[above] <- exp(log(g$mu[m]) + slope * (log(e[above]) - log(g$energy_kev[m])))
+    slope <- (g$logv[m] - g$logv[m - 1]) / (g$loge[m] - g$loge[m - 1])
+    out[above] <- exp(g$logv[m] + slope * (log(e[above]) - g$loge[m]))
   }
   out
 }

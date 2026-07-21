@@ -18,7 +18,9 @@ xrf_fp_sensitivity(
   excitation = c("photon", "electron"),
   excitation_weighting = c("cross_section", "jump"),
   coster_kronig = TRUE,
-  tube = NULL
+  m_cascade = TRUE,
+  tube = NULL,
+  primary_energy_kev = NULL
 )
 }
 \arguments{
@@ -33,11 +35,25 @@ xrf_fp_sensitivity(
 
 \item{efficiency}{Include the detector-efficiency term?}
 
-\item{excitation, excitation_weighting, coster_kronig}{Passed to \link{xrf_relative_peak_intensity}.}
+\item{excitation, excitation_weighting, coster_kronig, m_cascade}{Passed to
+\link{xrf_relative_peak_intensity}; \code{m_cascade} also governs the M super-Coster-Kronig
+cascade of the tube-integrated (polychromatic) production, keeping M-line sensitivities
+consistent with the \code{m_cascade = TRUE} deconvolution templates.}
 
 \item{tube}{Optional \link{xrf_tube}. When supplied (photon mode) the subshell excitation is the
 integral of the photoionization cross section over the \link{xrf_tube_spectrum} (polychromatic)
 rather than the monochromatic \code{beam_energy_kev}.}
+
+\item{primary_energy_kev}{Optional line energies (keV) identifying, per element, the line whose
+fitted \code{peak_area} this sensitivity will divide -- normally the deconvolution's
+\code{peaks$primary_energy_kev}. A named vector is matched by element symbol; an unnamed vector
+is recycled positionally along \code{elements}. For each element the sensitivity is computed for
+the tabulated line nearest the requested energy (within \code{max(2\%, 0.15 keV)}; the strongest
+line of a close doublet is preferred, so a small energy-calibration shift cannot swap
+K\eqn{\alpha_1} for K\eqn{\alpha_2}). If no line near that energy is excitable at these settings
+the element's sensitivity is \code{NA} with a warning (an area measured on an unexcitable line
+cannot be quantified by a different line's sensitivity). \code{NULL} / \code{NA} entries fall
+back to the template-consistent default described in Details.}
 }
 \value{
 A tibble with \code{element}, \code{primary_energy_kev}, and \code{sensitivity}.
@@ -48,4 +64,16 @@ matrix absorption): the subshell production (photo- or electron-ionization cross
 beam energy, times fluorescence yield and radiative branching) times the detector efficiency at
 the line energy. Values are relative (a single geometry/source constant is dropped), which is
 what \link{xrf_quantify} needs.
+}
+\details{
+\strong{Which line is "primary".} The sensitivity must be evaluated for the \emph{same line whose
+fitted area it will divide}, or the concentration is silently wrong by the ratio of the two lines'
+sensitivities (e.g. Ba K\eqn{\alpha} vs L\eqn{\alpha} under a 50 kV Rh tube differ ~100x). The
+deconvolution's \code{peak_area} is the area of the template's strongest line, ranked by the
+\emph{monochromatic} production at the beam energy (\link{xrf_energies}) -- so by default this
+function selects that same line, \emph{including} under a polychromatic \code{tube} (where the
+tube-integrated production can rank a different line first; the integral is still used for the
+sensitivity \emph{value}, just not for the line \emph{choice}). When the areas come from a fit,
+pass the fit's per-element line energies as \code{primary_energy_kev} to pin the pairing exactly
+(\link{xrf_quantify} and \link{xrf_observed_mass} do this automatically).
 }

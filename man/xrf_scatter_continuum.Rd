@@ -15,7 +15,13 @@ xrf_scatter_continuum(
   compton_broadening = 2,
   scatterer = "Si",
   n_grid = 250L,
-  energy_min_kev = 1
+  energy_min_kev = 1,
+  active_thickness_um = NULL,
+  be_window_um = NULL,
+  dead_layer_um = NULL,
+  air_path_cm = NULL,
+  atmosphere = "Air",
+  window = NULL
 )
 }
 \arguments{
@@ -39,6 +45,12 @@ amplitude is free in the fit). Defaults to \code{"Si"} (a light-matrix stand-in)
 \item{n_grid}{Number of energies sampled across the continuum (pseudo-lines per scatter type).}
 
 \item{energy_min_kev}{Low-energy start of the sampled continuum (keV).}
+
+\item{active_thickness_um, be_window_um, dead_layer_um, air_path_cm, atmosphere, window}{Detector /
+measurement-path overrides for the built-in efficiency weighting of the continuum shape
+(\link{xrf_detector_efficiency}); \code{NULL}/\code{"Air"} use the \code{detector_type} preset.
+\link{xrf_deconvolute_gaussian_least_squares} threads its own efficiency settings through, so
+the continuum shape sees the same window/air path as the element templates.}
 }
 \value{
 A tibble of templates with \code{element} ("scatter_rayleigh_continuum"/

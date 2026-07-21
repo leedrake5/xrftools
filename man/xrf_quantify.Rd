@@ -18,6 +18,7 @@ xrf_quantify(
   excitation = c("photon", "electron"),
   excitation_weighting = c("cross_section", "jump"),
   coster_kronig = TRUE,
+  m_cascade = TRUE,
   tube = NULL,
   self_absorption = TRUE,
   secondary_fluorescence = FALSE,
@@ -38,7 +39,7 @@ xrf_quantify(
 
 \item{beam_energy_kev}{Excitation energy (keV).}
 
-\item{detector_type, be_window_um, dead_layer_um, active_thickness_um, efficiency, excitation, excitation_weighting, coster_kronig, tube}{Passed to \link{xrf_fp_sensitivity}. Supplying \code{tube = }\link{xrf_tube} integrates the
+\item{detector_type, be_window_um, dead_layer_um, active_thickness_um, efficiency, excitation, excitation_weighting, coster_kronig, m_cascade, tube}{Passed to \link{xrf_fp_sensitivity}. Supplying \code{tube = }\link{xrf_tube} integrates the
 primary excitation over the polychromatic tube spectrum instead of a single energy.}
 
 \item{air_path_cm, atmosphere, window}{Measurement path for the efficiency model: air/He path length (cm), atmosphere ("Air"/"He"/"Vacuum") and an optional snout window; NULL / "Air" reproduce the historical no-path behaviour.}
@@ -99,11 +100,25 @@ an iterative self-absorption (matrix) correction for an infinitely-thick homogen
 with \eqn{\mu_s} the sample mass attenuation (mass-weighted over the current composition plus any
 \code{dark_matrix}). Concentrations are renormalized to sum to \code{total}. With
 \code{secondary_fluorescence = TRUE} it also adds first-order secondary (enhancement) fluorescence
-(Shiraiwa-Fujino): element i is additionally excited by the lines of every element j whose line
-energy exceeds i's absorption edge (and, with \code{tertiary_fluorescence = TRUE}, the third-order
-k -> j -> i chain). Excitation is monochromatic at \code{beam_energy_kev} unless a
+(Shiraiwa-Fujino): element i is additionally excited by \emph{every} emission line of element j's
+primary shell whose energy exceeds i's absorption edge -- each line with its own emission
+probability, ionization cross section and absorption legs, so K\eqn{\beta}-only enhancement (e.g.
+Cu enhancing Ni: Cu K\eqn{\alpha} is below the Ni K edge but Cu K\eqn{\beta} is above) is included
+(and, with \code{tertiary_fluorescence = TRUE}, the third-order k -> j -> i chain). Excitation is monochromatic at \code{beam_energy_kev} unless a
 \code{tube} is supplied, in which case the primary excitation is integrated over the polychromatic
 \link{xrf_tube_spectrum} (Ebel continuum + anode lines). Unmeasured light matrix (e.g. oxygen) can
 be supplied via \code{dark_matrix}, or computed by stoichiometry with \code{oxide}. Scatter/escape
 pseudo-elements are ignored.
+}
+\details{
+\strong{Area/sensitivity pairing.} When \code{object} is a deconvolution fit (or any peaks table
+with a \code{primary_energy_kev} column), each element's sensitivity is evaluated \emph{for the
+line the fit measured} (the column is passed to \link{xrf_fp_sensitivity} as
+\code{primary_energy_kev}). This matters under a polychromatic \code{tube}, where the
+tube-integrated production can rank a different line "primary" than the fit's templates did (e.g.
+Ba K\eqn{\alpha} in the fit vs L\eqn{\alpha} by tube-integrated production at 50 kV) -- dividing one
+line's area by the other line's sensitivity distorts the concentration by their sensitivity ratio
+(~100x for Ba). An element whose fitted line is not excitable at the supplied
+\code{beam_energy_kev} gets an \code{NA} sensitivity with a warning rather than a silently
+mis-paired value.
 }

@@ -1,4 +1,21 @@
 
+# Thick-sample scatter self-absorption kernel: detected scatter from a thick scatterer is
+# N(E) * sigma_scatter(E) / (mu(E)/sin psi_in + mu(E_out)/sin psi_out) -- the same Sherman-type
+# denominator as fluorescence, with the incident leg at the tube energy and the exit leg at the
+# detected (Rayleigh: same; Compton: shifted) energy. Without it the soft scatter components are
+# wildly over-weighted (a 3 keV photon scatters more per gram but almost none of it escapes the
+# sample). Uses the representative scatterer's TOTAL attenuation and the geometry's incidence /
+# takeoff angles. Relative shape only (templates carry a free amplitude).
+.xrf_scatter_sample_kernel <- function(scatterer, e_in, e_out, geometry) {
+  sin_in <- sin(geometry$incidence_deg * pi / 180)
+  sin_out <- sin(geometry$takeoff_deg * pi / 180)
+  a <- xrf_mass_attenuation(scatterer, e_in, type = "total") / max(sin_in, 1e-3) +
+    xrf_mass_attenuation(scatterer, e_out, type = "total") / max(sin_out, 1e-3)
+  k <- 1 / a
+  k[!is.finite(k) | k < 0] <- 0
+  k
+}
+
 #' Build Rayleigh and Compton tube-scatter peak templates
 #'
 #' The two largest features in most real XRF spectra are the tube's own characteristic lines
@@ -16,10 +33,16 @@
 #' and is broadened relative to the detector resolution (Doppler broadening of the Compton profile);
 #' \code{compton_broadening} scales the Compton width relative to the detector width at \eqn{E'}.
 #'
-#' The tube characteristic lines and their relative intensities are taken from \link{xrf_energies}
-#' for the anode element at the tube voltage. Rayleigh and Compton are returned as two separate
-#' "elements" (each a fixed-shape multi-line template with one free amplitude), because their ratio
-#' varies with the sample (light matrices scatter more incoherently).
+#' The tube characteristic lines and their fluxes are the \emph{Ebel} anode-line intensities of
+#' \link{xrf_tube_spectrum} (\code{discrete_lines = TRUE}; tube \code{filter} applied), and each
+#' line is weighted by the \code{scatterer}'s coherent (Rayleigh) or incoherent (Compton, with the
+#' fixed-angle Klein-Nishina factor) scattering cross section at its energy -- so the template's
+#' internal line balance (e.g. anode L vs K components) follows the physical emitted-and-scattered
+#' intensity, not the anode's fluorescence-production ratios. Rayleigh and Compton are returned as
+#' two separate "elements" (each a fixed-shape multi-line template with one free amplitude), because
+#' their ratio varies with the sample (light matrices scatter more incoherently). Note the detector
+#' efficiency is \emph{not} applied here; \link{xrf_deconvolute_gaussian_least_squares} applies its
+#' efficiency model to these rows together with the element templates when \code{efficiency = TRUE}.
 #'
 #' @param tube An \link{xrf_tube} object (needs \code{anode} and \code{kv}).
 #' @param geometry An \link{xrf_geometry} object (uses \code{scatter_angle_deg}).
@@ -29,7 +52,11 @@
 #' @param default_sigma Fallback constant peak width (keV) when no detector model is given.
 #' @param compton_broadening Multiplier on the detector width to approximate the Doppler-broadened
 #'   Compton peak (default 2).
-#' @param min_relative_intensity Smallest anode line to include (relative to the strongest).
+#' @param min_relative_intensity Smallest scatter line to include (relative to the strongest of
+#'   either component; the Rayleigh and Compton templates keep a common line set).
+#' @param scatterer Representative sample scatterer (element symbol or supported material) whose
+#'   coherent/incoherent cross sections weight the line intensities; default \code{"Si"}, matching
+#'   \link{xrf_scatter_continuum}.
 #'
 #' @return A tibble of peak templates with columns \code{element}
 #'   ("scatter_rayleigh"/"scatter_compton"), \code{trans}, \code{energy_kev}, \code{sigma},
@@ -43,7 +70,8 @@
 xrf_scatter_peaks <- function(tube, geometry = xrf_geometry(),
                               detector_type = NULL, fano = NULL, epsilon_ev = NULL,
                               noise_fwhm_ev = NULL, default_sigma = 0.07,
-                              compton_broadening = 2, min_relative_intensity = 0.05) {
+                              compton_broadening = 2, min_relative_intensity = 0.05,
+                              scatterer = "Si") {
   stopifnot(inherits(tube, "xrf_tube"))
   if (is.null(geometry)) geometry <- xrf_geometry()
   stopifnot(inherits(geometry, "xrf_geometry"))
@@ -62,14 +90,39 @@ xrf_scatter_peaks <- function(tube, geometry = xrf_geometry(),
     stop("tube anode '", tube$anode, "' is not a recognized element symbol.")
   }
 
-  tube_lines <- xrf_energies(anode, beam_energy_kev = tube$kv,
-                             min_relative_intensity = min_relative_intensity)
-  if (nrow(tube_lines) == 0) return(empty)
+  # Ebel anode-line fluxes (tube filter applied) x the scatterer's coherent/incoherent cross section
+  # at each line energy: what actually reaches the detector from the sample, up to the free template
+  # amplitude. (Previously the line weights were the anode's own fluorescence-production ratios from
+  # xrf_energies -- no emitted-flux physics, no filter, no scatter cross section.)
+  tube_lines <- xrf_tube_spectrum(tube, 1, discrete_lines = TRUE)
+  if (is.null(tube_lines) || nrow(tube_lines) == 0) return(empty)
 
   m_e_c2 <- 510.999                                  # electron rest energy (keV)
   theta <- geometry$scatter_angle_deg * pi / 180
   E <- tube_lines$energy_kev
   E_compton <- E / (1 + (E / m_e_c2) * (1 - cos(theta)))
+
+  sig_coh <- .xrf_material_scatter_mu(scatterer, E, "rayleigh"); sig_coh[!is.finite(sig_coh)] <- 0
+  sig_inc <- .xrf_material_scatter_mu(scatterer, E, "compton");  sig_inc[!is.finite(sig_inc)] <- 0
+  # fixed-angle Klein-Nishina reshaping, normalized by the angle-integrated KN total already inside
+  # mu_inc -- identical composition to xrf_scatter_continuum, so line and continuum scatter agree.
+  P <- E_compton / E
+  eps <- pmax(E / m_e_c2, 1e-6)
+  kn_tot <- 0.75 * (((1 + eps) / eps^2) * (2 * (1 + eps) / (1 + 2 * eps) - log(1 + 2 * eps) / eps) +
+                      log(1 + 2 * eps) / (2 * eps) - (1 + 3 * eps) / (1 + 2 * eps)^2)
+  kn <- (P^2 * (P + 1 / P - sin(theta)^2) / (1 + cos(theta)^2)) / kn_tot
+  kn[!is.finite(kn) | kn < 0] <- 0
+
+  rpi_ray <- tube_lines$flux * sig_coh * .xrf_scatter_sample_kernel(scatterer, E, E, geometry)
+  rpi_com <- tube_lines$flux * sig_inc * kn * .xrf_scatter_sample_kernel(scatterer, E, E_compton, geometry)
+  # one COMMON keep set (a line survives if either component clears the threshold), so the Rayleigh
+  # and Compton templates stay row-aligned
+  mr <- max(rpi_ray, 0); mc <- max(rpi_com, 0)
+  keep <- (mr > 0 & rpi_ray >= min_relative_intensity * mr) |
+    (mc > 0 & rpi_com >= min_relative_intensity * mc)
+  if (!any(keep)) return(empty)
+  E <- E[keep]; E_compton <- E_compton[keep]
+  rpi_ray <- rpi_ray[keep]; rpi_com <- rpi_com[keep]
 
   detector_given <- !is.null(detector_type) || !is.null(fano) ||
     !is.null(epsilon_ev) || !is.null(noise_fwhm_ev)
@@ -85,17 +138,17 @@ xrf_scatter_peaks <- function(tube, geometry = xrf_geometry(),
   dplyr::bind_rows(
     tibble::tibble(
       element = "scatter_rayleigh",
-      trans = paste0("rayleigh_", tube_lines$trans_siegbahn),
+      trans = paste0("rayleigh_", round(E, 3)),
       energy_kev = E,
       sigma = sigma_at(E),
-      relative_peak_intensity = tube_lines$relative_peak_intensity
+      relative_peak_intensity = rpi_ray
     ),
     tibble::tibble(
       element = "scatter_compton",
-      trans = paste0("compton_", tube_lines$trans_siegbahn),
+      trans = paste0("compton_", round(E, 3)),
       energy_kev = E_compton,
       sigma = sigma_at(E_compton) * compton_broadening,
-      relative_peak_intensity = tube_lines$relative_peak_intensity
+      relative_peak_intensity = rpi_com
     )
   )
 }
@@ -126,6 +179,11 @@ xrf_scatter_peaks <- function(tube, geometry = xrf_geometry(),
 #'   amplitude is free in the fit). Defaults to \code{"Si"} (a light-matrix stand-in).
 #' @param n_grid Number of energies sampled across the continuum (pseudo-lines per scatter type).
 #' @param energy_min_kev Low-energy start of the sampled continuum (keV).
+#' @param active_thickness_um,be_window_um,dead_layer_um,air_path_cm,atmosphere,window Detector /
+#'   measurement-path overrides for the built-in efficiency weighting of the continuum shape
+#'   (\link{xrf_detector_efficiency}); \code{NULL}/\code{"Air"} use the \code{detector_type} preset.
+#'   \link{xrf_deconvolute_gaussian_least_squares} threads its own efficiency settings through, so
+#'   the continuum shape sees the same window/air path as the element templates.
 #'
 #' @return A tibble of templates with \code{element} ("scatter_rayleigh_continuum"/
 #'   "scatter_compton_continuum"), \code{trans}, \code{energy_kev}, \code{sigma},
@@ -140,7 +198,10 @@ xrf_scatter_continuum <- function(tube, geometry = xrf_geometry(),
                                   detector_type = NULL, fano = NULL, epsilon_ev = NULL,
                                   noise_fwhm_ev = NULL, default_sigma = 0.07,
                                   compton_broadening = 2, scatterer = "Si", n_grid = 250L,
-                                  energy_min_kev = 1) {
+                                  energy_min_kev = 1,
+                                  active_thickness_um = NULL, be_window_um = NULL,
+                                  dead_layer_um = NULL, air_path_cm = NULL, atmosphere = "Air",
+                                  window = NULL) {
   stopifnot(inherits(tube, "xrf_tube"))
   if (is.null(geometry)) geometry <- xrf_geometry()
   stopifnot(inherits(geometry, "xrf_geometry"))
@@ -184,25 +245,45 @@ xrf_scatter_continuum <- function(tube, geometry = xrf_geometry(),
   s_ray <- sigma_at(grid)
   s_com <- sigma_at(E_compton, compton_broadening)
   # Fixed-angle shape corrections on top of the angle-integrated scatter cross sections:
-  #  - Compton: the Klein-Nishina energy dependence of the differential at THIS angle (P = E'/E; the factor
-  #    -> 1 at low E and falls at high E, i.e. steeper than the angle-integrated mu_inc at backscatter).
-  #    Rayleigh's angular factor (1+cos^2) is energy-independent at fixed angle, so it does not reshape the
+  #  - Compton: mu_inc(E) already carries the ANGLE-INTEGRATED Klein-Nishina energy falloff (times the
+  #    incoherent scattering function), so multiplying by the raw fixed-angle KN differential would count
+  #    the KN energy dependence twice. The correct fixed-angle reshaping replaces the angle-integrated KN
+  #    with the fixed-angle one: multiply by [dsigma_KN/dOmega(E, theta) / sigma_KN_tot(E)], normalized by
+  #    its Thomson limit [ (1+cos^2)/2 / sigma_T ] so the factor -> 1 at low energy. (The residual is the
+  #    fixed-angle vs angle-integrated difference of the incoherent function S(q, Z), whose table is not
+  #    carried; the co-fit background absorbs that smooth remainder.)
+  #  - Rayleigh's angular factor (1+cos^2) is energy-independent at fixed angle, so it does not reshape the
   #    coherent continuum; its q-dependent atomic form factor F(q,Z) would, but that table is not carried
   #    here (the co-fit background absorbs the smooth residual).
   #  - detector efficiency at the DETECTED energy (grid for Rayleigh, E' for Compton) shapes both continua --
   #    notably the low-energy window cutoff and the high-energy active-layer falloff -- when a preset is known.
   P <- E_compton / grid
-  kn <- P^2 * (P + 1 / P - sin(theta)^2) / (1 + cos(theta)^2)
+  eps <- pmax(grid / m_e_c2, 1e-6)
+  # total Klein-Nishina cross section relative to Thomson: sigma_KN(eps)/sigma_T = (3/4) * [ ... ] -> 1 - 2 eps
+  kn_tot <- 0.75 * (((1 + eps) / eps^2) * (2 * (1 + eps) / (1 + 2 * eps) - log(1 + 2 * eps) / eps) +
+                      log(1 + 2 * eps) / (2 * eps) - (1 + 3 * eps) / (1 + 2 * eps)^2)
+  kn <- (P^2 * (P + 1 / P - sin(theta)^2) / (1 + cos(theta)^2)) / kn_tot
   kn[!is.finite(kn) | kn < 0] <- 0
-  eff_ray <- if (!is.null(detector_type)) xrf_detector_efficiency(grid, detector_type = detector_type) else rep(1, length(grid))
-  eff_com <- if (!is.null(detector_type)) xrf_detector_efficiency(E_compton, detector_type = detector_type) else rep(1, length(E_compton))
+  eff_at <- function(e) {
+    xrf_detector_efficiency(e, detector_type = detector_type,
+                            active_thickness_um = active_thickness_um,
+                            be_window_um = be_window_um, dead_layer_um = dead_layer_um,
+                            air_path_cm = air_path_cm, atmosphere = atmosphere, window = window)
+  }
+  eff_ray <- if (!is.null(detector_type)) eff_at(grid) else rep(1, length(grid))
+  eff_com <- if (!is.null(detector_type)) eff_at(E_compton) else rep(1, length(E_compton))
   eff_ray[!is.finite(eff_ray)] <- 0; eff_com[!is.finite(eff_com)] <- 0
+  # thick-sample self-absorption of the scattered photon (incident leg at E, exit leg at the detected
+  # energy): the same kernel as xrf_scatter_peaks, so line and continuum scatter share one physics
+  ker_ray <- .xrf_scatter_sample_kernel(scatterer, grid, grid, geometry)
+  ker_com <- .xrf_scatter_sample_kernel(scatterer, grid, E_compton, geometry)
   out <- dplyr::bind_rows(
     tibble::tibble(element = "scatter_rayleigh_continuum", trans = paste0("raycont_", seq_along(grid)),
-                   energy_kev = grid, sigma = s_ray, relative_peak_intensity = N * sig_coh * eff_ray * spacing),
+                   energy_kev = grid, sigma = s_ray,
+                   relative_peak_intensity = N * sig_coh * ker_ray * eff_ray * spacing),
     tibble::tibble(element = "scatter_compton_continuum", trans = paste0("comcont_", seq_along(grid)),
                    energy_kev = E_compton, sigma = s_com,
-                   relative_peak_intensity = N * sig_inc * kn * eff_com * spacing)
+                   relative_peak_intensity = N * sig_inc * kn * ker_com * eff_com * spacing)
   )
   out[is.finite(out$relative_peak_intensity) & out$relative_peak_intensity > 0 &
         is.finite(out$energy_kev) & is.finite(out$sigma), , drop = FALSE]

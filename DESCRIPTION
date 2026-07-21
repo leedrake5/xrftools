@@ -19,6 +19,7 @@ Imports:
   ggplot2,
   ggrepel,
   nnls,
+  parallel,
   Matrix
 License: GPL-3
 Encoding: UTF-8

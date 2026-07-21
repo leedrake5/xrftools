@@ -13,7 +13,8 @@ xrf_scatter_peaks(
   noise_fwhm_ev = NULL,
   default_sigma = 0.07,
   compton_broadening = 2,
-  min_relative_intensity = 0.05
+  min_relative_intensity = 0.05,
+  scatterer = "Si"
 )
 }
 \arguments{
@@ -30,7 +31,12 @@ xrf_scatter_peaks(
 \item{compton_broadening}{Multiplier on the detector width to approximate the Doppler-broadened
 Compton peak (default 2).}
 
-\item{min_relative_intensity}{Smallest anode line to include (relative to the strongest).}
+\item{min_relative_intensity}{Smallest scatter line to include (relative to the strongest of
+either component; the Rayleigh and Compton templates keep a common line set).}
+
+\item{scatterer}{Representative sample scatterer (element symbol or supported material) whose
+coherent/incoherent cross sections weight the line intensities; default \code{"Si"}, matching
+\link{xrf_scatter_continuum}.}
 }
 \value{
 A tibble of peak templates with columns \code{element}
@@ -54,10 +60,16 @@ with \eqn{m_e c^2 = 511} keV and \eqn{\theta} the scattering angle (\code{geomet
 and is broadened relative to the detector resolution (Doppler broadening of the Compton profile);
 \code{compton_broadening} scales the Compton width relative to the detector width at \eqn{E'}.
 
-The tube characteristic lines and their relative intensities are taken from \link{xrf_energies}
-for the anode element at the tube voltage. Rayleigh and Compton are returned as two separate
-"elements" (each a fixed-shape multi-line template with one free amplitude), because their ratio
-varies with the sample (light matrices scatter more incoherently).
+The tube characteristic lines and their fluxes are the \emph{Ebel} anode-line intensities of
+\link{xrf_tube_spectrum} (\code{discrete_lines = TRUE}; tube \code{filter} applied), and each
+line is weighted by the \code{scatterer}'s coherent (Rayleigh) or incoherent (Compton, with the
+fixed-angle Klein-Nishina factor) scattering cross section at its energy -- so the template's
+internal line balance (e.g. anode L vs K components) follows the physical emitted-and-scattered
+intensity, not the anode's fluorescence-production ratios. Rayleigh and Compton are returned as
+two separate "elements" (each a fixed-shape multi-line template with one free amplitude), because
+their ratio varies with the sample (light matrices scatter more incoherently). Note the detector
+efficiency is \emph{not} applied here; \link{xrf_deconvolute_gaussian_least_squares} applies its
+efficiency model to these rows together with the element templates when \code{efficiency = TRUE}.
 }
 \examples{
 xrf_scatter_peaks(xrf_tube("Rh", kv = 40), xrf_geometry(scatter_angle_deg = 135),

@@ -309,7 +309,12 @@ test_that("the abundance prior shrinks the Laplace SE of a penalised element (it
 test_that("Compton normalization uses the fit covariance for its ratio SE (item 4)", {
   sig <- function(E) xrf_detector_sigma_kev(E, "SDD")
   e <- seq(2, 25, 0.03)
-  y <- xrftools:::gaussian_fun(e, 6.4, sig(6.4), 400) + xrftools:::gaussian_fun(e, 20.2, sig(20.2), 150) + 30
+  # the synthetic needs a REAL Compton feature at the shifted Rh Ka energy: since the scatter
+  # templates carry physical line shapes (Ebel flux x scatter cross section x sample kernel), a
+  # spectrum with only a flat pedestal there correctly gets a zero Compton amplitude
+  co <- 20.216 / (1 + (20.216 / 510.999) * (1 - cos(135 * pi / 180)))
+  y <- xrftools:::gaussian_fun(e, 6.4, sig(6.4), 400) + xrftools:::gaussian_fun(e, 20.2, sig(20.2), 150) +
+    xrftools:::gaussian_fun(e, co, 2 * sig(co), 120) + 30
   f <- xrf_deconvolute_gaussian_least_squares(e, y, peaks = xrf_energies(c("Fe", "Ca"), 40),
          detector_type = "SDD", tube = xrf_tube("Rh", kv = 40),
          geometry = xrf_geometry(scatter_angle_deg = 135), scatter_continuum = TRUE, background = 8)
@@ -319,4 +324,29 @@ test_that("Compton normalization uses the fit covariance for its ratio SE (item 
   fe_ind <- n_ind$peak_area_norm_se[n_ind$element == "Fe"]
   expect_true(is.finite(fe_cov) && fe_cov > 0)
   expect_false(isTRUE(all.equal(fe_cov, fe_ind)))
+})
+
+test_that("two-pass pile-up restores the parents' pile-up losses (P7)", {
+  set.seed(42)
+  e <- seq(1, 20, 0.02)
+  sig <- function(E) xrf_detector_sigma_kev(E, "SDD")
+  y <- xrftools:::gaussian_fun(e, 6.40, sig(6.40), 200) + xrftools:::gaussian_fun(e, 7.06, sig(7.06), 30)
+  counts <- round(y * 10); livetime <- 10
+  pk <- xrf_energies("Fe", 30)
+  f0 <- xrf_deconvolute_gaussian_least_squares(e, counts / livetime, peaks = pk, detector_type = "SDD",
+                                               counts = counts, livetime = livetime)
+  tau <- 2e-6
+  f1 <- xrf_deconvolute_gaussian_least_squares(e, counts / livetime, peaks = pk, detector_type = "SDD",
+                                               counts = counts, livetime = livetime, pileup_tau = tau)
+  R_tot <- sum(counts) / livetime
+  a0 <- f0$peaks$peak_area[f0$peaks$element == "Fe"]
+  a1 <- f1$peaks$peak_area[f1$peaks$element == "Fe"]
+  # the restored area exceeds the uncorrected one by ~exp(2 tau R_tot) (sum-peak subtraction is tiny here)
+  expect_equal(unname(a1 / a0), exp(2 * tau * R_tot), tolerance = 1e-3)
+  # pileup satellite rows keep their measured coincidence areas (not scaled up)
+  pu <- f1$peaks[grepl("^pileup_", f1$peaks$element), ]
+  if (nrow(pu) > 0) expect_true(all(pu$peak_area < a1))
+  # the scaled SE and the scaled covariance stay internally consistent (both carry the same factor)
+  expect_equal(unname(f1$area_cov["Fe", "Fe"]),
+               unname(f1$peaks$peak_area_se[f1$peaks$element == "Fe"]^2), tolerance = 1e-8)
 })

@@ -19,6 +19,7 @@ xrf_calibrate(
   excitation = c("photon", "electron"),
   excitation_weighting = c("cross_section", "jump"),
   coster_kronig = TRUE,
+  m_cascade = TRUE,
   tube = NULL,
   self_absorption = c("none", "generalized"),
   matrix = "silicate",
@@ -36,7 +37,7 @@ frame (as accepted by \link{xrf_observed_mass}).}
 value), one per standard, or a data frame with an \code{element} column plus one column per
 standard, or one row per standard with element columns.}
 
-\item{beam_energy_kev, detector_type, be_window_um, dead_layer_um, active_thickness_um, air_path_cm, atmosphere, window, efficiency, excitation, excitation_weighting, coster_kronig, tube, self_absorption, matrix, incidence_deg, takeoff_deg, normalization}{Passed to \link{xrf_observed_mass} to compute the observed values for each standard (use the
+\item{beam_energy_kev, detector_type, be_window_um, dead_layer_um, active_thickness_um, air_path_cm, atmosphere, window, efficiency, excitation, excitation_weighting, coster_kronig, m_cascade, tube, self_absorption, matrix, incidence_deg, takeoff_deg, normalization}{Passed to \link{xrf_observed_mass} to compute the observed values for each standard (use the
 settings you will apply to unknowns).}
 
 \item{weighting}{Least-squares weighting of the per-element through-origin slope across standards.

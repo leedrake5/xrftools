@@ -8,7 +8,8 @@ xrf_tube_spectrum(
   tube,
   energy_kev,
   takeoff_deg = 40,
-  char_peak_ratio = 100,
+  electron_incidence_deg = 90,
+  char_peak_ratio = 1,
   filter = TRUE,
   discrete_lines = FALSE
 )
@@ -18,25 +19,57 @@ xrf_tube_spectrum(
 
 \item{energy_kev}{Photon energies to evaluate (keV).}
 
-\item{takeoff_deg}{Anode take-off angle (degrees) for the anode self-absorption.}
+\item{takeoff_deg}{X-ray take-off angle \eqn{\alpha_x} (degrees) between the anode surface and the
+emerging beam, for the anode self-absorption path.}
 
-\item{char_peak_ratio}{Approximate peak height of the strongest characteristic line relative to
-the local continuum (tube characteristic lines tower over the continuum; this sets the
-line/continuum balance and is a modelling approximation).}
+\item{electron_incidence_deg}{Electron-beam incidence angle \eqn{\alpha_e} (degrees) between the
+anode surface and the electron beam. The default 90 (normal incidence) reproduces the historical
+geometry; side-window tubes are typically ~60-75.}
+
+\item{char_peak_ratio}{Multiplier on the Ebel characteristic-line intensities (default 1 = Ebel's
+absolute K/L line yields, so the line/continuum balance is physical; 0 removes the anode lines,
+e.g. when lines and continuum are handled separately). Historical note: this argument previously
+set an arbitrary "line height over local continuum" ratio (default 100) -- the Ebel
+characteristic model (stopping power, backscatter, depth absorption; see
+\code{.xrf_ebel_char_lines}) replaces that heuristic, so values other than 0/1 are now only a
+deliberate rescaling of the physical line intensities.}
 
 \item{filter}{Apply the tube's primary-beam \code{filter} (if any)?}
 
 \item{discrete_lines}{If TRUE, return the anode characteristic lines as discrete lines rather than rendered Gaussians (default FALSE).}
 }
 \value{
-Relative photon flux at each \code{energy_kev} (0 at or above the endpoint \code{kv}).
+Photon flux at each \code{energy_kev} (0 at or above the endpoint \code{kv}), on Ebel's
+  absolute scale: the continuum in photons/(sr mA keV s) and the rendered anode lines carrying
+  their absolute integrated flux in photons/(sr mA s) (with \code{discrete_lines = TRUE}, that
+  flux is returned directly). Most consumers use only ratios, but the absolute scale makes the
+  line/continuum balance -- and any future absolute-intensity work -- physical.
 }
 \description{
-The photon output of an X-ray tube versus energy: a bremsstrahlung continuum (Ebel 2001) shaped by
+The photon output of an X-ray tube versus energy: a bremsstrahlung continuum (Ebel 1999) shaped by
 self-absorption in the anode, plus the anode's characteristic lines, optionally attenuated by a
 primary-beam filter. Values are relative (an overall constant is dropped) -- what the
 fundamental-parameters excitation integral needs. Use it to weight excitation across the tube
 spectrum instead of assuming a single monochromatic energy.
+}
+\details{
+The anode self-absorption follows Ebel's depth model: the mean generation depth
+\eqn{\bar{\rho z}(E) = \bar{\rho z}_{max}\, p_1/p_2} is \emph{energy-dependent} (soft photons are
+generated over the whole electron range, photons near the endpoint only at the surface, so
+\eqn{\bar{\rho z} \to 0} as \eqn{E \to E_0}), with
+\eqn{\bar{\rho z}_{max} = (A/Z)\,[0.787\times10^{-5}\sqrt{J}\,E_0^{1.5} + 0.735\times10^{-6}E_0^2]},
+\eqn{J = 0.0135\,Z} keV, and \eqn{p_1/p_2} a function of \eqn{\ln(E_0/E)} and the electron
+backscatter factor \eqn{\eta(Z, E_0)} (Ebel's Eq. 4 constants). The escape factor is
+\eqn{f = (1 - e^{-\tau})/\tau} with
+\eqn{\tau = 2\,\mu_{pe}(E)\,\bar{\rho z}\,\sin\alpha_e/\sin\alpha_x}, using the \emph{photoelectric}
+mass attenuation (as in Ebel; coherent/incoherent scatter merely redirects within the anode).
+Ebel's stated validity is 5-50 kV tube voltage.
+
+\strong{Model the tube exit window as part of \code{filter}.} The Ebel model emits the spectrum at
+the anode surface; a real tube adds an exit window (commonly 75-300 um Be) that strongly cuts the
+soft continuum and the anode L series. Include it with any beam filters in \code{tube$filter},
+e.g. \code{xrf_tube("Rh", 40, filter = "Be 125; Al 100")} -- otherwise the unwindowed L-line /
+soft-end flux of this model is an overestimate of what reaches the sample.
 }
 \examples{
 e <- seq(1, 40, 0.05)
@@ -44,5 +77,8 @@ plot(e, xrf_tube_spectrum(xrf_tube("Rh", kv = 40), e), type = "l")
 
 }
 \references{
-Ebel, H. (2001). X-ray tube spectra. X-Ray Spectrometry 28, 255.
+Ebel, H. (1999). X-ray tube spectra. X-Ray Spectrometry 28(4), 255-266.
+
+Ebel, H. (2003). X-ray tube spectra: fundamental parameter algorithms for the description of
+K and L spectra (per-subshell L constants as implemented in XMI-MSIM).
 }

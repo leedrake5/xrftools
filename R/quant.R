@@ -97,10 +97,11 @@
 # calibration vector and rebuilt on the unknowns for .xrf_check_calibration_settings).
 .xrf_calibration_settings <- function(self_absorption, matrix, normalization, beam_energy_kev,
                                       detector_type, efficiency, excitation, excitation_weighting,
-                                      coster_kronig, tube) {
+                                      coster_kronig, tube, m_cascade = TRUE) {
   list(self_absorption = self_absorption, matrix = matrix, normalization = normalization,
        beam_energy_kev = beam_energy_kev, detector_type = detector_type, efficiency = efficiency,
        excitation = excitation, excitation_weighting = excitation_weighting, coster_kronig = coster_kronig,
+       m_cascade = m_cascade,
        tube = if (is.null(tube)) NULL else list(anode = tube$anode, kv = tube$kv))
 }
 
@@ -187,12 +188,36 @@ xrf_compton_normalize <- function(object, by = c("compton", "rayleigh", "scatter
 #' the line energy. Values are relative (a single geometry/source constant is dropped), which is
 #' what \link{xrf_quantify} needs.
 #'
+#' \strong{Which line is "primary".} The sensitivity must be evaluated for the \emph{same line whose
+#' fitted area it will divide}, or the concentration is silently wrong by the ratio of the two lines'
+#' sensitivities (e.g. Ba K\eqn{\alpha} vs L\eqn{\alpha} under a 50 kV Rh tube differ ~100x). The
+#' deconvolution's \code{peak_area} is the area of the template's strongest line, ranked by the
+#' \emph{monochromatic} production at the beam energy (\link{xrf_energies}) -- so by default this
+#' function selects that same line, \emph{including} under a polychromatic \code{tube} (where the
+#' tube-integrated production can rank a different line first; the integral is still used for the
+#' sensitivity \emph{value}, just not for the line \emph{choice}). When the areas come from a fit,
+#' pass the fit's per-element line energies as \code{primary_energy_kev} to pin the pairing exactly
+#' (\link{xrf_quantify} and \link{xrf_observed_mass} do this automatically).
+#'
 #' @param elements Element symbols.
 #' @param beam_energy_kev Excitation energy (keV).
+#' @param primary_energy_kev Optional line energies (keV) identifying, per element, the line whose
+#'   fitted \code{peak_area} this sensitivity will divide -- normally the deconvolution's
+#'   \code{peaks$primary_energy_kev}. A named vector is matched by element symbol; an unnamed vector
+#'   is recycled positionally along \code{elements}. For each element the sensitivity is computed for
+#'   the tabulated line nearest the requested energy (within \code{max(2\%, 0.15 keV)}; the strongest
+#'   line of a close doublet is preferred, so a small energy-calibration shift cannot swap
+#'   K\eqn{\alpha_1} for K\eqn{\alpha_2}). If no line near that energy is excitable at these settings
+#'   the element's sensitivity is \code{NA} with a warning (an area measured on an unexcitable line
+#'   cannot be quantified by a different line's sensitivity). \code{NULL} / \code{NA} entries fall
+#'   back to the template-consistent default described in Details.
 #' @param detector_type,be_window_um,dead_layer_um,active_thickness_um Detector parameters for the efficiency term
 #'   (see \link{xrf_detector_efficiency}); \code{efficiency = FALSE} omits it.
 #' @param efficiency Include the detector-efficiency term?
-#' @param excitation,excitation_weighting,coster_kronig Passed to \link{xrf_relative_peak_intensity}.
+#' @param excitation,excitation_weighting,coster_kronig,m_cascade Passed to
+#'   \link{xrf_relative_peak_intensity}; \code{m_cascade} also governs the M super-Coster-Kronig
+#'   cascade of the tube-integrated (polychromatic) production, keeping M-line sensitivities
+#'   consistent with the \code{m_cascade = TRUE} deconvolution templates.
 #' @param tube Optional \link{xrf_tube}. When supplied (photon mode) the subshell excitation is the
 #'   integral of the photoionization cross section over the \link{xrf_tube_spectrum} (polychromatic)
 #'   rather than the monochromatic \code{beam_energy_kev}.
@@ -207,28 +232,71 @@ xrf_fp_sensitivity <- function(elements, beam_energy_kev, detector_type = NULL,
                                efficiency = TRUE,
                                excitation = c("photon", "electron"),
                                excitation_weighting = c("cross_section", "jump"),
-                               coster_kronig = TRUE, tube = NULL) {
+                               coster_kronig = TRUE, m_cascade = TRUE, tube = NULL,
+                               primary_energy_kev = NULL) {
   excitation <- match.arg(excitation)
   excitation_weighting <- match.arg(excitation_weighting)
   xe <- xrftools::x_ray_xrf_energies
+
+  # Per-element target line energies (the line whose fitted area this sensitivity will divide):
+  # named vectors match by element symbol, unnamed recycle positionally; NULL/NA -> default ranking.
+  targets <- if (is.null(primary_energy_kev)) {
+    rep(NA_real_, length(elements))
+  } else if (!is.null(names(primary_energy_kev))) {
+    suppressWarnings(as.numeric(primary_energy_kev[elements]))
+  } else {
+    suppressWarnings(rep_len(as.numeric(primary_energy_kev), length(elements)))
+  }
 
   # Polychromatic excitation: when a tube is supplied (photon mode), weight each subshell's
   # production by the integral of its photoionization cross section over the Ebel tube spectrum
   # (continuum + anode lines) instead of a single monochromatic energy.
   poly <- !is.null(tube) && inherits(tube, "xrf_tube") && excitation == "photon"
-  if (poly) {
-    grid <- seq(0.1, tube$kv * 0.999, length.out = 400L)
-    de <- grid[2] - grid[1]
-    n_cont <- xrf_tube_spectrum(tube, grid, char_peak_ratio = 0)      # smooth continuum (grid integration)
-    char <- xrf_tube_spectrum(tube, grid, discrete_lines = TRUE)      # anode lines (integrated flux, discrete)
+  .init_physics_cache()
+  # tube excitation grid built LAZILY: if every requested element hits the per-element memo below,
+  # the tube spectrum is never evaluated at all
+  grid <- de <- n_cont <- char <- NULL
+  ensure_grid <- function() {
+    if (poly && is.null(grid)) {
+      grid <<- seq(0.1, tube$kv * 0.999, length.out = 400L)
+      de <<- grid[2] - grid[1]
+      n_cont <<- xrf_tube_spectrum(tube, grid, char_peak_ratio = 0)   # smooth continuum (grid integration)
+      char <<- xrf_tube_spectrum(tube, grid, discrete_lines = TRUE)   # anode lines (integrated flux, discrete)
+    }
   }
 
-  purrr::map_dfr(elements, function(el) {
-    lines <- xe[xe$element == el & xe$edge_kev <= beam_energy_kev, , drop = FALSE]
+  # Per-element result memo (environment hash). An element's sensitivity row depends only on that
+  # element + the excitation/detector settings -- never on which OTHER elements were requested -- so
+  # batches re-quantifying the same beam condition with varying detected-element subsets reuse rows
+  # across calls. Keyed on every argument that affects a row (incl. the CK source option and, when
+  # polychromatic, the tube signature). Rows with an unmatched primary_energy_kev target are NOT
+  # cached, so their warning re-fires on every offending call.
+  memo <- .xrf_cache$fp_row_store
+  if (is.null(memo)) { memo <- new.env(parent = emptyenv()); .xrf_cache$fp_row_store <- memo }
+  if (length(ls(memo)) > 8192) rm(list = ls(memo), envir = memo)      # crude cap; entries are 1-row tibbles
+  fmtk <- function(x) if (is.null(x)) "NULL" else paste(format(x, digits = 12), collapse = ",")
+  key_base <- paste(beam_energy_kev, fmtk(detector_type), fmtk(be_window_um), fmtk(dead_layer_um),
+                    fmtk(active_thickness_um), fmtk(air_path_cm), fmtk(atmosphere), fmtk(window),
+                    efficiency, excitation, excitation_weighting, coster_kronig, m_cascade,
+                    if (poly) paste(tube$anode, tube$kv, fmtk(tube$filter)) else "mono",
+                    getOption("xrftools.ck_source", "EADL97"), sep = "|")
+
+  unmatched <- character(0)
+  out <- purrr::map_dfr(seq_along(elements), function(k) {
+    el <- elements[k]
+    target <- targets[k]
+    row_key <- paste(el, if (is.finite(target)) format(round(target, 4)) else "def", key_base, sep = "|")
+    hit <- memo[[row_key]]
+    if (!is.null(hit)) return(hit)
+    xel <- .xrf_cache$xe_by_element[[el]]
+    lines <- if (is.null(xel)) xe[0, , drop = FALSE] else xel[xel$edge_kev <= beam_energy_kev, , drop = FALSE]
     if (nrow(lines) == 0) {
-      return(tibble::tibble(element = el, primary_energy_kev = NA_real_, sensitivity = NA_real_))
+      row <- tibble::tibble(element = el, primary_energy_kev = NA_real_, sensitivity = NA_real_)
+      memo[[row_key]] <- row
+      return(row)
     }
     rel <- if (poly) {
+      ensure_grid()
       # excitation integral = continuum on the grid + the anode characteristic lines added ANALYTICALLY at
       # their exact energies (sigma(E_line) * line_flux), instead of sampling 0.03-keV lines on the ~0.1-keV
       # grid -- which under-integrated them with up to ~33% grid-phase jitter (worse after the B2/B3 harder
@@ -242,7 +310,13 @@ xrf_fp_sensitivity <- function(elements, beam_energy_kev, detector_type = NULL,
         }
         val
       }
-      excit <- vapply(lines$edge, ex_shell, numeric(1))
+      # one integral per UNIQUE shell (an element's ~10 K rows previously repeated the same K integral)
+      sh_need <- unique(c(lines$edge, "L1", "L2", "L3",
+                          if (isTRUE(m_cascade)) c("M1", "M2", "M3", "M4", "M5")))
+      exv <- vapply(sh_need, ex_shell, numeric(1))
+      names(exv) <- sh_need
+      ex_shell <- function(sh) unname(exv[sh])
+      excit <- unname(exv[lines$edge])
       # Coster-Kronig L-subshell cascade (mirrors the mono xrf_relative_peak_intensity path, which the
       # poly branch previously bypassed -- so the coster_kronig argument had no effect under a tube and
       # heavy-element L-line sensitivities were under-counted). Redistribute the tube-integrated L1/L2
@@ -253,11 +327,22 @@ xrf_fp_sensitivity <- function(elements, beam_energy_kev, detector_type = NULL,
                                  rep(ex_shell("L1"), nrw), rep(ex_shell("L2"), nrw),
                                  rep(ex_shell("L3"), nrw))
       }
+      # M super-Coster-Kronig cascade on the tube-integrated production (mirrors the mono path's
+      # m_cascade, which the poly branch previously lacked -- so tube-mode M4/M5-line sensitivities
+      # were ~4x low relative to the m_cascade = TRUE deconvolution templates).
+      if (isTRUE(m_cascade)) {
+        nrw <- length(lines$edge)
+        excit <- .xrf_m_cascade(rep(el, nrw), lines$edge, excit,
+                                rep(ex_shell("M1"), nrw), rep(ex_shell("M2"), nrw),
+                                rep(ex_shell("M3"), nrw), rep(ex_shell("M4"), nrw),
+                                rep(ex_shell("M5"), nrw))
+      }
       excit * xrf_transition_probability(el, lines$trans)   # omega * branching (from emission prob)
     } else {
       xrf_relative_peak_intensity(el, lines$edge, lines$trans, beam_energy_kev,
                                   excitation_weighting = excitation_weighting,
-                                  coster_kronig = coster_kronig, excitation = excitation)
+                                  coster_kronig = coster_kronig, excitation = excitation,
+                                  m_cascade = m_cascade)
     }
     eff <- if (efficiency) {
       # full_energy_peak = TRUE: the sensitivity must predict the measured PHOTOPEAK area, so remove the
@@ -270,11 +355,58 @@ xrf_fp_sensitivity <- function(elements, beam_energy_kev, detector_type = NULL,
     } else {
       rep(1, nrow(lines))
     }
-    i <- which.max(rel)   # production-primary line (matches the deconvolution's primary_energy_kev)
-    tibble::tibble(element = el, primary_energy_kev = lines$energy_kev[i],
-                   primary_edge_kev = lines$edge_kev[i], primary_shell = lines$edge[i],
-                   sensitivity = (rel * eff)[i])
+    # ---- line SELECTION (see Details: the pairing between fitted area and sensitivity) -------------
+    # rank_rel is the ranking the deconvolution templates use: the MONOCHROMATIC production at the
+    # beam energy (what xrf_energies normalizes each element by). In the mono branch it IS `rel`; in
+    # the poly branch it is computed separately, because the tube-integrated production can rank a
+    # DIFFERENT line first (e.g. Ba: mono-at-50-kV -> Kalpha, tube-integrated -> Lalpha) -- using the
+    # poly argmax here paired the fit's Kalpha area with the Lalpha sensitivity (~100x error). The
+    # poly integral still provides the sensitivity VALUE; it just must not pick the line.
+    rank_rel <- if (poly) {
+      xrf_relative_peak_intensity(el, lines$edge, lines$trans, beam_energy_kev,
+                                  excitation_weighting = excitation_weighting,
+                                  coster_kronig = coster_kronig, excitation = excitation,
+                                  m_cascade = m_cascade)
+    } else {
+      rel
+    }
+    if (!any(is.finite(rank_rel))) rank_rel <- rel
+    i <- if (is.finite(target)) {
+      # Explicit pairing: the line the fit actually measured. Match within a tolerance wide enough for
+      # gain/zero drift (refine_calibration shifts the reported centroid) and, among the candidates,
+      # take the strongest by rank_rel -- so a shifted Kalpha1 cannot snap to the nearer-but-weaker
+      # Kalpha2 (halving the transition probability).
+      tol <- max(0.02 * target, 0.15)
+      cand <- which(abs(lines$energy_kev - target) <= tol)
+      if (!length(cand)) {
+        unmatched <<- c(unmatched, sprintf("%s (%.3f keV)", el, target))
+        return(tibble::tibble(element = el, primary_energy_kev = target,
+                              primary_edge_kev = NA_real_, primary_shell = NA_character_,
+                              sensitivity = NA_real_))
+      }
+      fin <- cand[is.finite(rank_rel[cand])]
+      if (length(fin)) fin[which.max(rank_rel[fin])]
+      else cand[which.min(abs(lines$energy_kev[cand] - target))]
+    } else {
+      which.max(rank_rel)   # template-consistent primary (matches the deconvolution's primary line)
+    }
+    if (!length(i)) {
+      return(tibble::tibble(element = el, primary_energy_kev = NA_real_, sensitivity = NA_real_))
+    }
+    row <- tibble::tibble(element = el, primary_energy_kev = lines$energy_kev[i],
+                          primary_edge_kev = lines$edge_kev[i], primary_shell = lines$edge[i],
+                          sensitivity = (rel * eff)[i])
+    memo[[row_key]] <- row
+    row
   })
+  if (length(unmatched)) {
+    warning("xrf_fp_sensitivity(): no excitable tabulated line lies near the requested ",
+            "primary_energy_kev for: ", paste(unmatched, collapse = ", "),
+            ". The fitted line cannot be produced at these settings, so its sensitivity is NA -- ",
+            "check that beam_energy_kev (and excitation mode) match the fit's peak list.",
+            call. = FALSE)
+  }
+  out
 }
 
 #' First-order fundamental-parameters quantification
@@ -286,18 +418,31 @@ xrf_fp_sensitivity <- function(elements, beam_energy_kev, detector_type = NULL,
 #' with \eqn{\mu_s} the sample mass attenuation (mass-weighted over the current composition plus any
 #' \code{dark_matrix}). Concentrations are renormalized to sum to \code{total}. With
 #' \code{secondary_fluorescence = TRUE} it also adds first-order secondary (enhancement) fluorescence
-#' (Shiraiwa-Fujino): element i is additionally excited by the lines of every element j whose line
-#' energy exceeds i's absorption edge (and, with \code{tertiary_fluorescence = TRUE}, the third-order
-#' k -> j -> i chain). Excitation is monochromatic at \code{beam_energy_kev} unless a
+#' (Shiraiwa-Fujino): element i is additionally excited by \emph{every} emission line of element j's
+#' primary shell whose energy exceeds i's absorption edge -- each line with its own emission
+#' probability, ionization cross section and absorption legs, so K\eqn{\beta}-only enhancement (e.g.
+#' Cu enhancing Ni: Cu K\eqn{\alpha} is below the Ni K edge but Cu K\eqn{\beta} is above) is included
+#' (and, with \code{tertiary_fluorescence = TRUE}, the third-order k -> j -> i chain). Excitation is monochromatic at \code{beam_energy_kev} unless a
 #' \code{tube} is supplied, in which case the primary excitation is integrated over the polychromatic
 #' \link{xrf_tube_spectrum} (Ebel continuum + anode lines). Unmeasured light matrix (e.g. oxygen) can
 #' be supplied via \code{dark_matrix}, or computed by stoichiometry with \code{oxide}. Scatter/escape
 #' pseudo-elements are ignored.
 #'
+#' \strong{Area/sensitivity pairing.} When \code{object} is a deconvolution fit (or any peaks table
+#' with a \code{primary_energy_kev} column), each element's sensitivity is evaluated \emph{for the
+#' line the fit measured} (the column is passed to \link{xrf_fp_sensitivity} as
+#' \code{primary_energy_kev}). This matters under a polychromatic \code{tube}, where the
+#' tube-integrated production can rank a different line "primary" than the fit's templates did (e.g.
+#' Ba K\eqn{\alpha} in the fit vs L\eqn{\alpha} by tube-integrated production at 50 kV) -- dividing one
+#' line's area by the other line's sensitivity distorts the concentration by their sensitivity ratio
+#' (~100x for Ba). An element whose fitted line is not excitable at the supplied
+#' \code{beam_energy_kev} gets an \code{NA} sensitivity with a warning rather than a silently
+#' mis-paired value.
+#'
 #' @param object A \code{deconvolution_fit} or its \code{peaks} data frame (needs \code{element},
 #'   \code{peak_area}).
 #' @param beam_energy_kev Excitation energy (keV).
-#' @param detector_type,be_window_um,dead_layer_um,active_thickness_um,efficiency,excitation,excitation_weighting,coster_kronig,tube
+#' @param detector_type,be_window_um,dead_layer_um,active_thickness_um,efficiency,excitation,excitation_weighting,coster_kronig,m_cascade,tube
 #'   Passed to \link{xrf_fp_sensitivity}. Supplying \code{tube = }\link{xrf_tube} integrates the
 #'   primary excitation over the polychromatic tube spectrum instead of a single energy.
 #' @param self_absorption Apply the iterative self-absorption correction?
@@ -346,6 +491,7 @@ xrf_quantify <- function(object, beam_energy_kev, detector_type = NULL,
                          efficiency = TRUE,
                          excitation = c("photon", "electron"),
                          excitation_weighting = c("cross_section", "jump"), coster_kronig = TRUE,
+                         m_cascade = TRUE,
                          tube = NULL, self_absorption = TRUE, secondary_fluorescence = FALSE,
                          tertiary_fluorescence = FALSE, incidence_deg = 45, takeoff_deg = 45,
                          dark_matrix = NULL, oxide = FALSE, total = 1, iterations = 12,
@@ -360,13 +506,20 @@ xrf_quantify <- function(object, beam_energy_kev, detector_type = NULL,
   q <- peaks[keep, , drop = FALSE]
   if (nrow(q) == 0) stop("No real element peaks with positive area to quantify.")
 
+  # Pair the sensitivity to the LINE THE FIT MEASURED: a deconvolution's peak_area is the area of its
+  # template's primary line (recorded in peaks$primary_energy_kev), so the sensitivity must be evaluated
+  # for that same line. Without this, the tube-integrated production can rank a different line first
+  # (Ba: fit measures Kalpha, poly production ranks Lalpha) and the concentration is silently off by the
+  # ratio of the two lines' sensitivities (~100x for Ba under a 50 kV Rh tube).
   s <- xrf_fp_sensitivity(q$element, beam_energy_kev, detector_type = detector_type,
                           be_window_um = be_window_um, dead_layer_um = dead_layer_um,
                           active_thickness_um = active_thickness_um,
                           air_path_cm = air_path_cm, atmosphere = atmosphere, window = window,
                           efficiency = efficiency, excitation = match.arg(excitation),
                           excitation_weighting = match.arg(excitation_weighting),
-                          coster_kronig = coster_kronig, tube = tube)
+                          coster_kronig = coster_kronig, m_cascade = m_cascade, tube = tube,
+                          primary_energy_kev = if ("primary_energy_kev" %in% names(q))
+                            suppressWarnings(as.numeric(q$primary_energy_kev)) else NULL)
   q$primary_energy_kev <- s$primary_energy_kev
   q$primary_edge_kev <- s$primary_edge_kev
   q$primary_shell <- s$primary_shell
@@ -413,13 +566,13 @@ xrf_quantify <- function(object, beam_energy_kev, detector_type = NULL,
     # element's line energy). These are composition-INDEPENDENT, so doing the (expensive) mass-attenuation
     # lookups once here -- rather than on every iteration -- makes mu_at() a fast weighted sum.
     mu_energies <- c(beam_energy_kev, Ei)                    # index 1 = beam, index i+1 = line i
-    mu_tab <- vapply(mu_energies, function(en) vapply(els, function(el) .xrf_element_total_mu(el, en), numeric(1)),
-                     numeric(length(els)))
-    if (!is.matrix(mu_tab)) mu_tab <- matrix(mu_tab, nrow = length(els))            # length(els)==1 guard
-    muO_tab  <- if (any(r > 0)) vapply(mu_energies, function(en) .xrf_element_total_mu("O", en), numeric(1)) else NULL
-    muDM_tab <- if (length(dm_el)) vapply(mu_energies, function(en) vapply(dm_el, function(el) .xrf_element_total_mu(el, en), numeric(1)),
-                                          numeric(length(dm_el))) else NULL
-    if (!is.null(muDM_tab) && !is.matrix(muDM_tab)) muDM_tab <- matrix(muDM_tab, nrow = length(dm_el))
+    # one vectorized interpolation per ELEMENT over all energies (the transposed nested-scalar version
+    # made length(els) x length(mu_energies) one-point approx() calls and dominated the profile)
+    mu_tab <- t(matrix(vapply(els, function(el) .xrf_element_total_mu(el, mu_energies),
+                              numeric(length(mu_energies))), nrow = length(mu_energies)))
+    muO_tab  <- if (any(r > 0)) .xrf_element_total_mu("O", mu_energies) else NULL
+    muDM_tab <- if (length(dm_el)) t(matrix(vapply(dm_el, function(el) .xrf_element_total_mu(el, mu_energies),
+                                                   numeric(length(mu_energies))), nrow = length(mu_energies))) else NULL
     mu_at <- function(k) {   # k indexes mu_energies; matrix attenuation over the current mix
       m <- sum(conc * mu_tab[, k])
       o_c <- sum(conc * r); if (o_c > 0 && !is.null(muO_tab)) m <- m + o_c * muO_tab[k]      # derived oxygen
@@ -440,11 +593,14 @@ xrf_quantify <- function(object, beam_energy_kev, detector_type = NULL,
       grid <- seq(0.1, tube$kv * 0.999, length.out = 400L)
       dgrid <- grid[2] - grid[1]
       N_grid <- xrf_tube_spectrum(tube, grid)
-      # per-element primary-shell production on the grid (composition-independent; same CK basis as S_i)
-      P_grid <- vapply(seq_along(els), function(i)
-        .xrf_shell_production(els[i], q$primary_shell[i], grid, coster_kronig = isTRUE(coster_kronig)),
-        numeric(length(grid)))                                   # [n_grid x n_els]
-      if (!is.matrix(P_grid)) P_grid <- matrix(P_grid, ncol = length(els))
+      # per-element primary-shell production on the grid (composition-independent; same CK basis as S_i),
+      # as ONE vectorized call over the (element x grid) tuples: inside, the lookups collapse to one
+      # interpolation per unique element:shell key instead of per-element passes
+      ng <- length(grid)
+      P_grid <- matrix(.xrf_shell_production(rep(els, each = ng), rep(q$primary_shell, each = ng),
+                                             rep(grid, times = length(els)),
+                                             coster_kronig = isTRUE(coster_kronig)),
+                       nrow = ng)                                # [n_grid x n_els]
       wgt_grid <- P_grid * N_grid                                # excitation weight N(E) * sigma_i(E)
       excit_bare <- colSums(wgt_grid) * dgrid                    # bare (no-absorption) integral per element
       excit_bare[!is.finite(excit_bare) | excit_bare <= 0] <- NA_real_
@@ -460,7 +616,6 @@ xrf_quantify <- function(object, beam_energy_kev, detector_type = NULL,
 
     # precompute the (concentration-independent) atomic factors for secondary fluorescence
     if (isTRUE(secondary_fluorescence)) {
-      omega_j <- xrf_fluorescence_yield(els, q$primary_shell)
       edge_i <- q$primary_edge_kev
       # Exciter/absorber production uses the SHELL-PARTIAL photoionization cross section (with the CK
       # L-cascade) -- the SAME production basis as the primary sensitivity S_i -- not the total
@@ -470,10 +625,52 @@ xrf_quantify <- function(object, beam_energy_kev, detector_type = NULL,
       # excitation mode, so the CK L-cascade follows coster_kronig directly.
       ck <- isTRUE(coster_kronig)
       tau_E0 <- .xrf_shell_production(els, q$primary_shell, beam_energy_kev, coster_kronig = ck)
-      # tau_ij[i, j] = shell-partial production of element i (its primary shell) at element j's line energy
-      tau_ij <- vapply(seq_along(els), function(j)
-        .xrf_shell_production(els, q$primary_shell, Ei[j], coster_kronig = ck), numeric(length(els)))
-      if (!is.matrix(tau_ij)) tau_ij <- matrix(tau_ij, nrow = length(els))    # length(els)==1 guard
+      # Exciter LINE LISTS (P6): element j enhances i through EVERY line of j's primary shell whose
+      # energy clears i's absorption edge -- not only through j's primary line. The classic miss was
+      # Kbeta-only enhancement: Cu Kalpha (8.05 keV) cannot ionize Ni (edge 8.33) but Cu Kbeta
+      # (8.90) can, so a primary-line-only model reports zero Cu -> Ni enhancement. Each line l
+      # carries its emission probability wp_l = omega * branching; summed over the shell these equal
+      # the old single "omega_j at the primary energy" factor, so this is the same normalization
+      # split correctly across the emission spectrum (each line with its own tau_i(E_l), mu_s(E_l)
+      # and absorption-leg logs). Sub-0.5% satellite lines are dropped.
+      exc_lines <- lapply(seq_along(els), function(j) {
+        xj <- .xrf_cache$xe_by_element[[els[j]]]
+        lr <- if (is.null(xj)) xj else xj[xj$edge == q$primary_shell[j], , drop = FALSE]
+        if (is.null(lr) || nrow(lr) == 0) return(data.frame(energy_kev = numeric(0), wp = numeric(0)))
+        wp <- xrf_transition_probability(els[j], lr$trans)
+        ok_l <- is.finite(wp) & wp > 0 & is.finite(lr$energy_kev)
+        en <- lr$energy_kev[ok_l]; wp <- wp[ok_l]
+        keep_l <- wp >= 0.005 * sum(wp)
+        data.frame(energy_kev = en[keep_l], wp = wp[keep_l])
+      })
+      exc_E  <- unlist(lapply(exc_lines, function(d) d$energy_kev))   # pooled exciter-line energies
+      exc_wp <- unlist(lapply(exc_lines, function(d) d$wp))
+      exc_j  <- rep(seq_along(els), vapply(exc_lines, nrow, integer(1)))
+      if (is.null(exc_E)) { exc_E <- numeric(0); exc_wp <- numeric(0); exc_j <- integer(0) }
+      # tau_il[i, m] = shell-partial production of element i at pooled exciter-line energy exc_E[m],
+      # as ONE vectorized call (the per-energy loop made n_els x n_exc scalar interpolation calls)
+      tau_il <- if (length(exc_E)) {
+        matrix(.xrf_shell_production(rep(els, times = length(exc_E)),
+                                     rep(q$primary_shell, times = length(exc_E)),
+                                     rep(exc_E, each = length(els)), coster_kronig = ck),
+               nrow = length(els))
+      } else matrix(0, length(els), 0)
+      # matrix attenuation at the pooled exciter-line energies (composition-independent per-element
+      # columns; combined with the current mix each iteration, exactly like mu_tab / mu_at)
+      if (length(exc_E)) {
+        mu_exc_tab <- t(matrix(vapply(els, function(el) .xrf_element_total_mu(el, exc_E),
+                                      numeric(length(exc_E))), nrow = length(exc_E)))
+        muO_exc  <- if (any(r > 0)) .xrf_element_total_mu("O", exc_E) else NULL
+        muDM_exc <- if (length(dm_el)) t(matrix(vapply(dm_el, function(el) .xrf_element_total_mu(el, exc_E),
+                                                       numeric(length(exc_E))), nrow = length(exc_E))) else NULL
+        # concentration-INDEPENDENT structure of the B assembly, precomputed once: gate_mat[i, m] =
+        # "line m clears element i's edge"; j_mat[m, j] = "line m belongs to exciter j". The old
+        # per-(i, j) `which(exc_j == j & exc_E > edge_i[i])` inside the iteration loop cost
+        # n_els^2 x iterations which() calls -- ~46% of total quantification time at ~80 elements.
+        gate_mat <- outer(edge_i, exc_E, FUN = "<")                       # [n_els x n_exc]
+        j_mat <- matrix(0, length(exc_E), length(els))
+        j_mat[cbind(seq_along(exc_j), exc_j)] <- 1                        # [n_exc x n_els]
+      }
     }
 
     # E4: finite-thickness self-absorption kernel. For a homogeneous layer of areal density
@@ -484,8 +681,12 @@ xrf_quantify <- function(object, beam_energy_kev, detector_type = NULL,
       if (is.finite(areal_density)) (1 - exp(-A * areal_density)) / A else 1 / A
     }
     for (iter in seq_len(iterations)) {
-      mu_e0 <- mu_at(1L)
-      mu_ei <- vapply(seq_along(Ei), function(i) mu_at(i + 1L), numeric(1))
+      # matrix attenuation of the current mix at ALL tabulated energies in one shot (beam + lines)
+      mu_all <- colSums(mu_tab * conc)
+      o_ca <- sum(conc * r); if (o_ca > 0 && !is.null(muO_tab)) mu_all <- mu_all + o_ca * muO_tab
+      if (!is.null(muDM_tab)) mu_all <- mu_all + as.vector(crossprod(muDM_tab, dm_frac))
+      mu_e0 <- mu_all[1L]
+      mu_ei <- mu_all[-1L]
       if (!isTRUE(self_absorption)) {
         m_corr <- 1
       } else if (poly_selfabs) {
@@ -493,10 +694,11 @@ xrf_quantify <- function(object, beam_energy_kev, detector_type = NULL,
         mu_s_grid <- as.vector(mu_grid_el %*% conc)
         o_c <- sum(conc * r); if (o_c > 0 && !is.null(muO_grid)) mu_s_grid <- mu_s_grid + o_c * muO_grid
         if (!is.null(muDM_grid)) mu_s_grid <- mu_s_grid + as.vector(muDM_grid %*% dm_frac)
-        m_corr <- vapply(seq_along(els), function(i) {
-          if (!is.finite(excit_bare[i])) return(fin_abs(mu_e0 / sin_in + mu_ei[i] / sin_out))  # fallback
-          sum(wgt_grid[, i] * fin_abs(mu_s_grid / sin_in + mu_ei[i] / sin_out)) * dgrid / excit_bare[i]
-        }, numeric(1))
+        # one [n_grid x n_els] matrix op instead of a per-element vapply
+        m_corr <- colSums(wgt_grid * fin_abs(outer(mu_s_grid / sin_in, mu_ei / sin_out, `+`))) *
+          dgrid / excit_bare
+        fb <- !is.finite(excit_bare)
+        if (any(fb)) m_corr[fb] <- fin_abs(mu_e0 / sin_in + mu_ei[fb] / sin_out)               # fallback
       } else {
         m_corr <- fin_abs(mu_e0 / sin_in + mu_ei / sin_out)                                 # monochromatic (exact)
       }
@@ -523,32 +725,47 @@ xrf_quantify <- function(object, beam_energy_kev, detector_type = NULL,
           o_c2 <- sum(conc * r); if (o_c2 > 0 && !is.null(muO_grid)) mu_s_grid2 <- mu_s_grid2 + o_c2 * muO_grid
           if (!is.null(muDM_grid)) mu_s_grid2 <- mu_s_grid2 + as.vector(muDM_grid %*% dm_frac)
         }
-        inc_leg <- vapply(seq_along(els), function(j) {
-          muj <- mu_ei[j]
-          if (poly_g && is.finite(excit_bare[j]) && excit_bare[j] > 0)
-            sum(wgt_grid[, j] * (sin_in / mu_s_grid2) * log(1 + mu_s_grid2 / (sin_in * muj))) * dgrid / excit_bare[j]
-          else (sin_in / mu_e0) * log(1 + mu_e0 / (sin_in * muj))
-        }, numeric(1))
-        for (i in seq_along(els)) {
-          for (j in seq_along(els)) {
-            if (j == i || !is.finite(Ei[j]) || Ei[j] <= edge_i[i]) next
-            muj <- mu_ei[j]                       # sample attenuation at j's line energy
-            g <- 0.5 * muj * (inc_leg[j] +
-                                (sin_out / mu_ei[i]) * log(1 + mu_ei[i] / (sin_out * muj)))
-            # W10: under a tube, weight the enhancer/primary production ratio by the polychromatic
-            # excitation integral (integral N(E) sigma(E) dE) instead of the single endpoint energy, so a
-            # low-Z exciter excited across the whole spectrum is not undercounted relative to a heavy
-            # exciter only reachable near the endpoint. Reduces to the monochromatic sigma_j(E0)/sigma_i(E0)
-            # when N -> delta. (The g-factor incident term still uses the endpoint mu_e0 -- a bounded,
-            # second-order residual, since (sin_in/mu_e0) ln(1 + mu_e0/(sin_in muj)) -> 1/muj as mu_e0 -> 0.)
-            prod_ratio <- if (poly && is.finite(excit_bare[j]) && is.finite(excit_bare[i]) &&
-                              excit_bare[i] > 0) {
-              excit_bare[j] / excit_bare[i]
-            } else {
-              tau_E0[j] / tau_E0[i]
-            }
-            B[i, j] <- omega_j[j] * prod_ratio * (tau_ij[i, j] / muj) * g
+        # matrix attenuation at every pooled exciter-line energy for the CURRENT composition
+        mu_exc <- if (length(exc_E)) {
+          v <- colSums(mu_exc_tab * conc)
+          o_c3 <- sum(conc * r); if (o_c3 > 0 && !is.null(muO_exc)) v <- v + o_c3 * muO_exc
+          if (!is.null(muDM_exc)) v <- v + as.vector(crossprod(muDM_exc, dm_frac))
+          v
+        } else numeric(0)
+        # incident-leg log term per pooled exciter line (still weighted by exciter j's OWN
+        # polychromatic excitation profile wgt_grid[, j]; endpoint form for a monochromatic source),
+        # as one [n_grid x n_ok] matrix op instead of a per-line vapply
+        inc_leg_l <- (sin_in / mu_e0) * log(1 + mu_e0 / (sin_in * mu_exc))
+        if (poly_g && length(exc_E)) {
+          okj <- is.finite(excit_bare[exc_j]) & excit_bare[exc_j] > 0
+          if (any(okj)) {
+            Lmat <- (sin_in / mu_s_grid2) * log(1 + outer(mu_s_grid2, sin_in * mu_exc[okj], `/`))
+            inc_leg_l[okj] <- colSums(wgt_grid[, exc_j[okj], drop = FALSE] * Lmat) *
+              dgrid / excit_bare[exc_j[okj]]
           }
+        }
+        # B assembled as matrix algebra over the precomputed gate/membership structure:
+        #   Term[i, m] = 0.5 wp_m tau_i(E_m) [L_in(m) + L_out(i, m)]   (per exciter line; this is the
+        #   old omega_j (tau_ij/mu_j) g with mu_j cancelled analytically and the shell yield split
+        #   over the emission lines, sum_m wp_m = omega_j), gated by edge clearance and summed into
+        #   exciters via j_mat, then scaled by the production ratio -- W10: under a tube the poly
+        #   excitation integral eb_j/eb_i, with the monochromatic tau_E0 ratio as fallback. Replaces
+        #   the n_els^2 x iterations double loop (which() alone was ~46% of quantification time).
+        if (length(exc_E)) {
+          n_el <- length(els); n_ex <- length(exc_E)
+          out_leg <- (sin_out / mu_ei) * log(1 + outer(mu_ei, sin_out * mu_exc, `/`))
+          Term <- (0.5 * tau_il) * matrix(exc_wp, n_el, n_ex, byrow = TRUE) *
+            (matrix(inc_leg_l, n_el, n_ex, byrow = TRUE) + out_leg)
+          Term[!is.finite(Term) | !gate_mat] <- 0
+          pr_tau <- outer(1 / tau_E0, tau_E0)
+          pr <- if (poly) {
+            eb_fin <- is.finite(excit_bare)
+            ifelse(outer(eb_fin, eb_fin, `&`), outer(1 / excit_bare, excit_bare), pr_tau)
+          } else {
+            pr_tau
+          }
+          B <- (Term %*% j_mat) * pr
+          diag(B) <- 0
         }
         enh2 <- as.vector(B %*% conc)
         enh <- if (isTRUE(tertiary_fluorescence)) as.vector(B %*% (conc * (1 + enh2))) else enh2
@@ -630,7 +847,10 @@ xrf_quantify <- function(object, beam_energy_kev, detector_type = NULL,
 #'
 #' @param object A \code{deconvolution_fit} or its \code{peaks} data frame (needs \code{element},
 #'   \code{peak_area}; scatter pseudo-elements are used for \code{normalization} and then dropped).
-#' @param beam_energy_kev,detector_type,be_window_um,dead_layer_um,active_thickness_um,efficiency,excitation,excitation_weighting,coster_kronig,tube
+#'   A \code{primary_energy_kev} column, when present, pins each element's sensitivity to the fitted
+#'   line (see \link{xrf_fp_sensitivity}; this keeps the area/sensitivity pairing consistent under a
+#'   polychromatic \code{tube}).
+#' @param beam_energy_kev,detector_type,be_window_um,dead_layer_um,active_thickness_um,efficiency,excitation,excitation_weighting,coster_kronig,m_cascade,tube
 #'   Passed to \link{xrf_fp_sensitivity} to compute \eqn{S_i}.
 #' @param self_absorption "none" (default) returns \eqn{A_i/S_i} (the observed areal mass, where the
 #'   real matrix has cancelled into the per-element sampling depth). "generalized" divides out that
@@ -667,7 +887,7 @@ xrf_observed_mass <- function(object, beam_energy_kev, detector_type = NULL, be_
                               air_path_cm = NULL, atmosphere = "Air", window = NULL, efficiency = TRUE,
                               excitation = c("photon", "electron"),
                               excitation_weighting = c("cross_section", "jump"),
-                              coster_kronig = TRUE, tube = NULL,
+                              coster_kronig = TRUE, m_cascade = TRUE, tube = NULL,
                               self_absorption = c("none", "generalized"), matrix = "silicate",
                               incidence_deg = 45, takeoff_deg = 45,
                               normalization = c("none", "compton", "rayleigh", "scatter"),
@@ -682,13 +902,17 @@ xrf_observed_mass <- function(object, beam_energy_kev, detector_type = NULL, be_
   q <- peaks[keep, , drop = FALSE]
   if (nrow(q) == 0) stop("No real element peaks with positive area.")
 
+  # Pair the sensitivity to the line the fit measured (see xrf_quantify / xrf_fp_sensitivity docs):
+  # the input's primary_energy_kev, when present, pins which line each element's sensitivity is for.
   s <- xrf_fp_sensitivity(q$element, beam_energy_kev, detector_type = detector_type,
                           be_window_um = be_window_um, dead_layer_um = dead_layer_um,
                           active_thickness_um = active_thickness_um,
                           air_path_cm = air_path_cm, atmosphere = atmosphere, window = window,
                           efficiency = efficiency, excitation = match.arg(excitation),
                           excitation_weighting = match.arg(excitation_weighting),
-                          coster_kronig = coster_kronig, tube = tube)
+                          coster_kronig = coster_kronig, m_cascade = m_cascade, tube = tube,
+                          primary_energy_kev = if ("primary_energy_kev" %in% names(q))
+                            suppressWarnings(as.numeric(q$primary_energy_kev)) else NULL)
   q$primary_energy_kev <- s$primary_energy_kev
   q$sensitivity <- s$sensitivity
 
@@ -731,7 +955,7 @@ xrf_observed_mass <- function(object, beam_energy_kev, detector_type = NULL, be_
     }
     .xrf_check_calibration_settings(calibration, .xrf_calibration_settings(
       self_absorption, matrix, normalization, beam_energy_kev, detector_type, efficiency,
-      match.arg(excitation), match.arg(excitation_weighting), coster_kronig, tube))
+      match.arg(excitation), match.arg(excitation_weighting), coster_kronig, tube, m_cascade))
     k <- unname(calibration[q$element])
     miss <- q$element[!is.finite(k)]
     if (length(miss) > 0) {                          # NA (not 1): never mix relative + absolute scales
@@ -773,7 +997,7 @@ xrf_observed_mass <- function(object, beam_energy_kev, detector_type = NULL, be_
 #' @param values The known reference values, either a list of named numeric vectors (element ->
 #'   value), one per standard, or a data frame with an \code{element} column plus one column per
 #'   standard, or one row per standard with element columns.
-#' @param beam_energy_kev,detector_type,be_window_um,dead_layer_um,active_thickness_um,air_path_cm,atmosphere,window,efficiency,excitation,excitation_weighting,coster_kronig,tube,self_absorption,matrix,incidence_deg,takeoff_deg,normalization
+#' @param beam_energy_kev,detector_type,be_window_um,dead_layer_um,active_thickness_um,air_path_cm,atmosphere,window,efficiency,excitation,excitation_weighting,coster_kronig,m_cascade,tube,self_absorption,matrix,incidence_deg,takeoff_deg,normalization
 #'   Passed to \link{xrf_observed_mass} to compute the observed values for each standard (use the
 #'   settings you will apply to unknowns).
 #' @param weighting Least-squares weighting of the per-element through-origin slope across standards.
@@ -792,6 +1016,7 @@ xrf_calibrate <- function(standards, values, beam_energy_kev, detector_type = NU
                           efficiency = TRUE,
                           excitation = c("photon", "electron"),
                           excitation_weighting = c("cross_section", "jump"), coster_kronig = TRUE,
+                          m_cascade = TRUE,
                           tube = NULL, self_absorption = c("none", "generalized"),
                           matrix = "silicate", incidence_deg = 45, takeoff_deg = 45,
                           normalization = c("none", "compton", "rayleigh", "scatter"),
@@ -820,6 +1045,7 @@ xrf_calibrate <- function(standards, values, beam_energy_kev, detector_type = NU
                       air_path_cm = air_path_cm, atmosphere = atmosphere, window = window,
                       efficiency = efficiency, excitation = excitation,
                       excitation_weighting = excitation_weighting, coster_kronig = coster_kronig,
+                      m_cascade = m_cascade,
                       tube = tube, self_absorption = self_absorption, matrix = matrix,
                       incidence_deg = incidence_deg, takeoff_deg = takeoff_deg,
                       normalization = normalization))
@@ -851,6 +1077,6 @@ xrf_calibrate <- function(standards, values, beam_energy_kev, detector_type = NU
   # record ALL the sensitivity-scale settings so xrf_observed_mass can warn if they are not matched on the unknowns
   attr(k, "settings") <- .xrf_calibration_settings(self_absorption, matrix, normalization, beam_energy_kev,
                                                    detector_type, efficiency, excitation, excitation_weighting,
-                                                   coster_kronig, tube)
+                                                   coster_kronig, tube, m_cascade)
   k
 }

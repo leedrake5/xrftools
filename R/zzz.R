@@ -2,10 +2,48 @@
 # Package environment for cached lookup tables
 .xrf_cache <- new.env(parent = emptyenv())
 
-# Last-call cache of the deconvolution design matrix, reused across a batch of spectra that share
-# the same energy grid, peak list and line-shape (only the response vector changes). See
+# Keyed FIFO store for xrf_energies() results (multi-condition batches alternate beam energies, so a
+# last-call memo missed on every switch; see .xrf_kv_get/.xrf_kv_put below).
+.xrf_energies_store <- new.env(parent = emptyenv())
+
+# Keyed cache of deconvolution design matrices, reused across a batch of spectra that share the
+# same energy grid, peak list and line-shape (only the response vector changes). Holds SEVERAL
+# entries (FIFO), because real batches interleave beam conditions (e.g. 50/12/10 kV cycles per
+# sample): a single-slot cache missed on every condition switch and rebuilt every template. See
 # xrf_deconvolute_gaussian_least_squares(cache_templates = TRUE).
 .xrf_template_cache <- new.env(parent = emptyenv())
+
+# tiny keyed FIFO store on an environment: entries = list of list(key, val); identical() key match.
+# max_entries bounds memory (a cached design matrix is ~1-2 MB); linear scan over <= 8 keys is ~us.
+.xrf_kv_get <- function(env, key) {
+  for (e in env$entries) if (identical(e$key, key)) return(e$val)
+  NULL
+}
+.xrf_kv_put <- function(env, key, val, max_entries = 8L) {
+  env$entries <- c(env$entries, list(list(key = key, val = val)))
+  if (length(env$entries) > max_entries) env$entries <- env$entries[-1]
+  invisible()
+}
+
+# Collapse duplicated grid energies (the EPDL tables double each absorption edge: one row just below,
+# one just at the edge) ONCE here, so the interpolators can use the fast ties = "ordered" path (the
+# default ties handling routes through tapply()/mean() per call, which dominated the physics-lookup
+# profile). The collapse MUST average the LOGS (geometric mean): the interpolators have always called
+# approx() on log-transformed grids, whose ties = "mean" averaged log values -- averaging the linear
+# values instead changes edge-point results enormously (the O K-edge pair spans 0.29 -> 2.3e5 cm^2/g:
+# arithmetic mean 1.1e5 vs the legacy geometric 255, a 440x difference that leaked into
+# efficiency-weighted areas for lines near absorber edges). Geometric keeps every lookup byte-identical
+# to the pre-cache behaviour. Also precomputes the log grids so nothing re-logs the table per call.
+.xrf_collapse_loglog <- function(x, y) {
+  ux <- unique(x)                       # x arrives sorted ascending, so ux is sorted too
+  ly <- log(y)
+  if (length(ux) != length(x)) {
+    idx <- match(x, ux)
+    ly <- as.vector(rowsum(ly, idx) / rowsum(rep(1, length(ly)), idx))
+    x <- ux
+  }
+  data.frame(energy_kev = x, value = exp(ly), loge = log(x), logv = ly)
+}
 
 # Lazy initialization of lookup tables using named vectors
 # Named vector lookup with match() is faster than left_join for repeated lookups
@@ -35,43 +73,42 @@
 
     # Build per (element:shell) photoionization cross-section grids for log-log interpolation.
     # Below an edge the tabulated cross section is NA; drop those so each grid starts at the edge.
+    # Duplicate (edge-doubled) energies are collapsed and the log grids precomputed (.xrf_collapse_loglog).
     xs <- x_ray_cross_sections
     xs <- xs[!is.na(xs$cross_section) & xs$cross_section > 0 & xs$energy_kev > 0, ]
     xs <- xs[order(xs$energy_kev), ]
-    .xrf_cache$cross_section_split <- split(
-      data.frame(energy_kev = xs$energy_kev, cross_section = xs$cross_section),
-      paste(xs$element, xs$shell, sep = ":")
+    .xrf_cache$cross_section_split <- lapply(
+      split(data.frame(energy_kev = xs$energy_kev, cross_section = xs$cross_section),
+            paste(xs$element, xs$shell, sep = ":")),
+      function(g) .xrf_collapse_loglog(g$energy_kev, g$cross_section)
     )
 
     # Per-element mass attenuation grids (cm^2/g) from the full EPDL table: photoelectric (for the
-    # active-volume absorption / escape mu-ratios) and total (for window/dead-layer transmission).
+    # active-volume absorption / escape mu-ratios) and total (for window/dead-layer transmission),
+    # plus coherent (Rayleigh) / incoherent (Compton) scatter for the scatter templates. All collapsed
+    # + pre-logged like the cross sections.
     ma <- x_ray_mass_attenuation
     ma <- ma[is.finite(ma$energy_kev) & ma$energy_kev > 0, ]
     ma <- ma[order(ma$element, ma$energy_kev), ]
-    pe_ok <- ma[is.finite(ma$photoelectric) & ma$photoelectric > 0, ]
-    .xrf_cache$pe_mu_split <- split(
-      data.frame(energy_kev = pe_ok$energy_kev, mu = pe_ok$photoelectric), pe_ok$element
-    )
-    tot_ok <- ma[is.finite(ma$total) & ma$total > 0, ]
-    .xrf_cache$total_mu_split <- split(
-      data.frame(energy_kev = tot_ok$energy_kev, mu = tot_ok$total), tot_ok$element
-    )
-    # coherent (Rayleigh) and incoherent (Compton) scatter mass attenuation (cm^2/g), for the scattered-
-    # continuum templates (xrf_scatter_continuum): the shape of the sample scatter background vs energy.
-    ray_ok <- ma[is.finite(ma$rayleigh) & ma$rayleigh > 0, ]
-    .xrf_cache$rayleigh_mu_split <- split(
-      data.frame(energy_kev = ray_ok$energy_kev, mu = ray_ok$rayleigh), ray_ok$element
-    )
-    com_ok <- ma[is.finite(ma$compton) & ma$compton > 0, ]
-    .xrf_cache$compton_mu_split <- split(
-      data.frame(energy_kev = com_ok$energy_kev, mu = com_ok$compton), com_ok$element
-    )
+    mu_split <- function(col) {
+      ok <- is.finite(ma[[col]]) & ma[[col]] > 0
+      lapply(split(data.frame(energy_kev = ma$energy_kev[ok], mu = ma[[col]][ok]), ma$element[ok]),
+             function(g) .xrf_collapse_loglog(g$energy_kev, g$mu))
+    }
+    .xrf_cache$pe_mu_split <- mu_split("photoelectric")
+    .xrf_cache$total_mu_split <- mu_split("total")
+    .xrf_cache$rayleigh_mu_split <- mu_split("rayleigh")
+    .xrf_cache$compton_mu_split <- mu_split("compton")
 
     # Subshell absorption-edge energies keyed "element:shell" (from the line table), used by the
     # electron-impact ionization model for the overvoltage U = E0 / E_edge.
     xe <- x_ray_xrf_energies
     ek <- unique(xe[, c("element", "edge", "edge_kev")])
     .xrf_cache$edge_kev_vec <- setNames(ek$edge_kev, paste(ek$element, ek$edge, sep = ":"))
+    # per-element split of the line table: xrf_fp_sensitivity and the secondary-fluorescence
+    # exciter-line lists subset by element once per element per call, so a pre-split list lookup
+    # beats scanning the full table each time
+    .xrf_cache$xe_by_element <- split(xe, xe$element)
 
     # Bote-Salvat (2008) electron-impact ionization coefficients, keyed "z:subshell".
     bs <- x_ray_bote_salvat

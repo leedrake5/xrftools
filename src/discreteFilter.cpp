@@ -17,30 +17,29 @@ NumericVector discreteFilter(NumericVector x, NumericVector f, bool scale, bool 
   NumericVector out(n);
 
   int fLength = f.length();
-  int fMid = fLength / 2L;
-  int filterStart;
-  int filterEnd;
-  int vectorStart;
-  int vectorEnd;
-  double filterValue;
+  int fMid = fLength / 2;
 
-  for(int i=0; i<n; i++) {
-    filterStart = max(IntegerVector::create(0L, fMid - i));
-    filterEnd = min(IntegerVector::create(fLength - 1L, n - 1L - i + fMid));
-    vectorStart = max(IntegerVector::create(0, i - fMid));
-    vectorEnd = min(IntegerVector::create(n - 1, i + fMid));
+  // plain accumulation loops: the previous implementation materialized fLocal/xLocal subvectors
+  // (plus IntegerVector::create() temporaries for the bounds) on EVERY channel, so a single smoothing
+  // pass allocated ~6 small vectors per channel; same arithmetic, no allocations.
+  for(int i = 0; i < n; i++) {
+    int filterStart = fMid - i > 0 ? fMid - i : 0;
+    int filterEnd = n - 1 - i + fMid < fLength - 1 ? n - 1 - i + fMid : fLength - 1;
 
-    NumericVector fLocal = f[seq(filterStart, filterEnd)];
-    NumericVector xLocal = x[seq(vectorStart, vectorEnd)];
-    filterValue = sum(fLocal * xLocal);
-    if(scale) {
-      filterValue = filterValue / sum(fLocal);
+    double acc = 0.0;
+    double fSum = 0.0;
+    for(int k = filterStart; k <= filterEnd; k++) {
+      acc += f[k] * x[i - fMid + k];
+      fSum += f[k];
+    }
+    if(scale && fSum != 0.0) {
+      acc /= fSum;
     }
 
-    if(!tails && (fLocal.length() != fLength)) {
+    if(!tails && (filterEnd - filterStart + 1 != fLength)) {
       out[i] = NA_REAL;
     } else {
-      out[i] = filterValue;
+      out[i] = acc;
     }
   }
 

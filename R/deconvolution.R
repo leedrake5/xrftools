@@ -54,8 +54,9 @@
 #'   trace areas cleanly (r^2 = 1 on synthetics; SNIP-only over-estimates traces 100-300\% under a Compton
 #'   hump). Enabling it on the default baseline-subtracted \code{.values = cps - baseline}, or without a
 #'   fitted \code{background}, double-counts the baseline and biases real peaks -- a warning then fires.
-#' @param scatter_scatterer Representative sample scatterer setting the continuum shape (see
-#'   \link{xrf_scatter_continuum}); default "Si".
+#' @param scatter_scatterer Representative sample scatterer weighting both the anode-line scatter
+#'   templates (\link{xrf_scatter_peaks}) and the scattered-continuum shape
+#'   (\link{xrf_scatter_continuum}); default "Si".
 #' @param background Number of broad, non-negative Gaussian background basis functions to fit jointly with
 #'   the peaks (default 0 = off). When \eqn{\ge 1}, the deconvolution models a smooth background \emph{as
 #'   part of the fit}, so you can feed it an \strong{un-baselined} response (\code{.values = cps}) instead
@@ -77,8 +78,14 @@
 #'   skipped. Reserved for scaling the pile-up contribution.
 #' @param pileup_tau Optional detector pulse-pair resolution time (seconds). When supplied with
 #'   \code{counts}/\code{.counts} and \code{livetime}/\code{.livetime}, a physically-constrained
-#'   two-pass pile-up correction is applied (coincidence peak areas fixed to \eqn{2\tau/T\,A_iA_j});
-#'   this supersedes the free-amplitude \code{sum_peaks} model.
+#'   two-pass pile-up correction is applied: coincidence peaks with areas fixed to
+#'   \eqn{2\tau A_i A_j/\Delta E} (\eqn{\Delta E} the channel width; live time cancels in rate space)
+#'   are subtracted and the elements refitted, and the reported \code{height}/\code{peak_area} (and
+#'   SEs/covariances) of all non-pileup templates are then multiplied by \eqn{e^{2\tau R_{tot}}}
+#'   (\eqn{R_{tot}} the gross count rate) to restore the counts each line lost \emph{to} pile-up --
+#'   a uniform factor, so ratios are unchanged but absolute quantities
+#'   (\link{xrf_observed_mass}, calibrated results) are corrected. \code{response}/\code{components}
+#'   stay in measured (piled-up) space. This supersedes the free-amplitude \code{sum_peaks} model.
 #' @param use_qr If TRUE (default) unconstrained fits (\code{nonneg = FALSE}) use fast QR
 #'   decomposition; set FALSE for fork-safe \code{lm()} under multicore parallelism. Ignored when
 #'   \code{nonneg = TRUE}.
@@ -141,6 +148,7 @@ xrf_add_deconvolution_gls <- function(.spectra, .energy_kev = .data$.spectra$ene
                                       use_qr = TRUE, abundance_prior = 0, abundance_ref_ppm = 100,
                                       abundance_protect = character(0), abundance_ppm = NULL,
                                       prior = c("ridge", "lasso", "elastic_net"), enet_alpha = 0.5,
+                                      .cores = 1L,
                                       .env = parent.frame()) {
   .energy_kev <- enquo(.energy_kev)
   .values <- enquo(.values)
@@ -232,6 +240,7 @@ xrf_add_deconvolution_gls <- function(.spectra, .energy_kev = .data$.spectra$ene
     abundance_ppm = !!abundance_ppm,
     prior = !!prior,
     enet_alpha = !!enet_alpha,
+    .cores = .cores,
     .env = .env
   )
 }
@@ -286,6 +295,24 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
       pu_within <- (energy_kev >= energy_min_kev) & (energy_kev <= energy_max_kev)
       pass2$response$response_fit <- pass2$response$response_fit + pu$model[pu_within]
     }
+    # Restore the parents' pile-up LOSSES (the two passes above only remove the sum-peak artifacts;
+    # the counts that migrated into them -- and into out-of-window sums -- came out of the parent
+    # lines). Under Poisson arrivals a pulse survives un-piled with probability exp(-2 tau R_tot),
+    # R_tot the gross count rate, so the true line intensities exceed the fitted ones by
+    # exp(+2 tau R_tot). The factor is UNIFORM (any pulse piles with any other): ratios, Compton
+    # normalization and closed concentrations are unchanged; absolute quantities (xrf_observed_mass,
+    # calibrated masses) are corrected. Covariances scale by the factor squared. The pileup_ rows
+    # keep their measured coincidence areas, and response/components stay in measured space.
+    R_tot <- sum(counts, na.rm = TRUE) / livetime
+    if (is.finite(R_tot) && R_tot > 0) {
+      k_loss <- exp(2 * pileup_tau * R_tot)
+      not_pu <- !grepl("^pileup_", pass2$peaks$element)
+      for (cc in intersect(c("height", "height_se", "peak_area", "peak_area_se"), names(pass2$peaks))) {
+        pass2$peaks[[cc]][not_pu] <- pass2$peaks[[cc]][not_pu] * k_loss
+      }
+      if (!is.null(pass2$coef_cov)) pass2$coef_cov <- pass2$coef_cov * k_loss^2
+      if (!is.null(pass2$area_cov)) pass2$area_cov <- pass2$area_cov * k_loss^2
+    }
     return(pass2)
   }
 
@@ -306,27 +333,13 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
     stopifnot(is.numeric(peaks$relative_peak_intensity))
   }
 
-  # Optional detector efficiency: reweight each line by the fraction actually recorded in the
-  # photopeak (window/dead-layer transmission x active-volume absorption). Corrects intra-element
-  # line shape and, for quantification, absolute sensitivity; largest at high energy where thin Si
-  # detectors are transparent to heavy-element K-lines.
-  if (isTRUE(efficiency)) {
-    peaks$relative_peak_intensity <- peaks$relative_peak_intensity *
-      xrf_detector_efficiency(peaks$energy_kev, detector_type = detector_type,
-                              active_thickness_um = active_thickness_um,
-                              be_window_um = be_window_um, dead_layer_um = dead_layer_um,
-                              air_path_cm = air_path_cm, atmosphere = atmosphere, window = window)
-  }
-
-  # Optional escape peaks: satellites at (parent energy - detector K X-ray), tied to the parent's
-  # amplitude. Built from the (efficiency-corrected) parent intensities, so append after efficiency.
-  if (isTRUE(escape)) {
-    peaks <- dplyr::bind_rows(peaks, xrf_escape_peaks(peaks, detector_type = detector_type))
-  }
-
   # Optional Rayleigh/Compton tube-scatter templates: appended as two extra "elements" so they are
   # fit (non-negatively) jointly with the element lines instead of being left in the baseline.
-  # Enabled automatically when a tube is supplied; force with scatter = TRUE / FALSE.
+  # Enabled automatically when a tube is supplied; force with scatter = TRUE / FALSE. Appended
+  # BEFORE the efficiency step below so a multi-line scatter template's INTERNAL shape (e.g. the
+  # anode L components at ~3 keV vs K at ~20 keV) gets the same detector-efficiency weighting as
+  # the element lines -- unweighted, the shared-amplitude template misfits both regions and pushes
+  # residuals into whatever elements sit there.
   include_scatter <- if (is.null(scatter)) {
     !is.null(tube) && inherits(tube, "xrf_tube")
   } else {
@@ -340,9 +353,31 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
       tube, if (is.null(geometry)) xrf_geometry() else geometry,
       detector_type = detector_type, fano = fano, epsilon_ev = epsilon_ev,
       noise_fwhm_ev = noise_fwhm_ev, default_sigma = default_sigma,
-      compton_broadening = compton_broadening
+      compton_broadening = compton_broadening, scatterer = scatter_scatterer
     )
     peaks <- dplyr::bind_rows(peaks, scatter_peaks)
+  }
+
+  # Optional detector efficiency: reweight each line by the fraction actually recorded in the
+  # photopeak (window/dead-layer transmission x active-volume absorption). Corrects intra-element
+  # line shape and, for quantification, absolute sensitivity; largest at high energy where thin Si
+  # detectors are transparent to heavy-element K-lines. Applies to the element AND the anode-line
+  # scatter templates (the scattered-continuum templates below weight themselves with the same
+  # settings).
+  if (isTRUE(efficiency)) {
+    peaks$relative_peak_intensity <- peaks$relative_peak_intensity *
+      xrf_detector_efficiency(peaks$energy_kev, detector_type = detector_type,
+                              active_thickness_um = active_thickness_um,
+                              be_window_um = be_window_um, dead_layer_um = dead_layer_um,
+                              air_path_cm = air_path_cm, atmosphere = atmosphere, window = window)
+  }
+
+  # Optional escape peaks: satellites at (parent energy - detector K X-ray), tied to the parent's
+  # amplitude. Built from the (efficiency-corrected) parent intensities, so append after efficiency.
+  # Scatter templates get escape satellites too (a 20 keV Rayleigh line has a real Si-escape peak at
+  # ~18.3 keV), tied to the scatter amplitudes.
+  if (isTRUE(escape)) {
+    peaks <- dplyr::bind_rows(peaks, xrf_escape_peaks(peaks, detector_type = detector_type))
   }
 
   # Optional scattered bremsstrahlung CONTINUUM templates (Rayleigh + Compton of the tube continuum, #E1),
@@ -368,7 +403,10 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
       tube, if (is.null(geometry)) xrf_geometry() else geometry,
       detector_type = detector_type, fano = fano, epsilon_ev = epsilon_ev,
       noise_fwhm_ev = noise_fwhm_ev, default_sigma = default_sigma,
-      compton_broadening = compton_broadening, scatterer = scatter_scatterer
+      compton_broadening = compton_broadening, scatterer = scatter_scatterer,
+      active_thickness_um = active_thickness_um, be_window_um = be_window_um,
+      dead_layer_um = dead_layer_um, air_path_cm = air_path_cm, atmosphere = atmosphere,
+      window = window
     )
     if (nrow(cont_peaks) > 0) peaks <- dplyr::bind_rows(peaks, cont_peaks)
   }
@@ -561,18 +599,16 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
 
   # ---- design matrix (cached across a batch, #15) ------------------------------------------------
   tmpl_key <- list(energy_kev = energy_kev, peaks = peaks_tmpl, tail = tail, step = step, beta = beta)
-  if (cache_templates && !isTRUE(refine_calibration) && !is.null(.xrf_template_cache$key) &&
-      identical(.xrf_template_cache$key, tmpl_key)) {
-    responses <- .xrf_template_cache$responses
-    X <- .xrf_template_cache$X
+  cached <- if (cache_templates && !isTRUE(refine_calibration)) .xrf_kv_get(.xrf_template_cache, tmpl_key)
+  if (!is.null(cached)) {
+    responses <- cached$responses
+    X <- cached$X
   } else {
     bx <- build_X(peaks_tmpl)
     X <- bx$X
     responses <- bx$meta
     if (cache_templates && !isTRUE(refine_calibration)) {
-      .xrf_template_cache$key <- tmpl_key
-      .xrf_template_cache$responses <- responses
-      .xrf_template_cache$X <- X
+      .xrf_kv_put(.xrf_template_cache, tmpl_key, list(responses = responses, X = X))
     }
   }
   elements <- responses$element
@@ -846,13 +882,18 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
 #' @param .spectra A \link{xrf_spectra} tibble.
 #' @param .fun A function that
 #' @param ... Passed to .fun
+#' @param .cores Number of processes for the per-spectrum map (default 1 = serial). Values > 1 use
+#'   \code{parallel::mclapply} (fork-based; on Windows this silently runs serially). Forked workers
+#'   inherit -- but cannot write back to -- the template/line/sensitivity caches, so for best scaling
+#'   on a repetitive batch, run one spectrum per beam condition first to warm the caches, then the
+#'   rest in parallel.
 #' @param .env Calling environment
 #'
 #' @return .spectra with a .deconvolution column, and a deconvolution column added to
 #'   the .spectra column
 #' @export
 #'
-xrf_add_deconvolution_fun <- function(.spectra, .fun, ..., .env = parent.frame()) {
+xrf_add_deconvolution_fun <- function(.spectra, .fun, ..., .cores = 1L, .env = parent.frame()) {
   dots <- quos(...)
   fun_wrap <- function(spectrum) {
     # args evaluated within each row
@@ -861,7 +902,11 @@ xrf_add_deconvolution_fun <- function(.spectra, .fun, ..., .env = parent.frame()
   }
 
   # calculate deconvolutions
-  deconvs <- purrr::map(purrr::transpose(.spectra), fun_wrap)
+  deconvs <- if (.cores > 1L && .Platform$OS.type != "windows") {
+    parallel::mclapply(purrr::transpose(.spectra), fun_wrap, mc.cores = .cores)
+  } else {
+    purrr::map(purrr::transpose(.spectra), fun_wrap)
+  }
 
   # place each element of the output in a column in the data frame
 
