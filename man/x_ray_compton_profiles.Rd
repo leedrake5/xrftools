@@ -3,9 +3,12 @@
 \docType{data}
 \name{x_ray_compton_profiles}
 \alias{x_ray_compton_profiles}
+\alias{x_ray_compton_profiles_shells}
 \title{Compton profiles of the elements}
 \format{
 An object of class \code{tbl_df} (inherits from \code{tbl}, \code{data.frame}) with 3162 rows and 4 columns.
+
+An object of class \code{tbl_df} (inherits from \code{tbl}, \code{data.frame}) with 48484 rows and 7 columns.
 }
 \source{
 DABAX copy vendored via the xraylib project (BSD-3-Clause,
@@ -13,6 +16,8 @@ DABAX copy vendored via the xraylib project (BSD-3-Clause,
 }
 \usage{
 x_ray_compton_profiles
+
+x_ray_compton_profiles_shells
 }
 \description{
 The total electron momentum density \eqn{J(p_z)} per element (Biggs, Mendelsohn & Mann 1975,
@@ -23,6 +28,15 @@ impulse approximation the Compton-scattered energy distribution of a line \eqn{E
   {\sqrt{E_0^2 + E_2^2 - 2 E_0 E_2 \cos\theta}},}
 which is the physical, asymmetric Doppler broadening of the Compton peak -- used by
 \link{xrf_scatter_peaks} (\code{compton_shape = "profile"}) in place of a broadened Gaussian.
+}
+\details{
+\code{x_ray_compton_profiles_shells} carries the per-SUBSHELL profiles (per electron;
+  the occupancy-weighted sum reproduces the total) together with each subshell's occupancy and
+  binding energy. A subshell contributes to Compton scattering only where the energy transfer
+  exceeds its binding energy -- the constraint that displaces core-shell contributions to the
+  low-energy side of the Compton line and produces the Compton defect. One transcription error in
+  the DABAX source (Eu subshell 3 at \eqn{p_z = 30}) is repaired at build time by log-interpolation
+  (see \code{data-raw/compton_profiles.R}).
 }
 \references{
 Biggs, F., Mendelsohn, L.B., Mann, J.B. (1975). Hartree-Fock Compton profiles for the elements.

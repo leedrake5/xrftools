@@ -88,26 +88,63 @@
   acc
 }
 
+# Bound-electron momentum density of a material: like .xrf_material_J, but summed per SUBSHELL with
+# the kinematic binding threshold -- subshell k contributes only where the energy TRANSFER exceeds
+# its binding energy B_k (an electron cannot be ejected with less). This is what displaces the
+# core-shell contributions to the low-energy side of the Compton line (at Rh Kalpha / 135 deg the
+# transfer at the peak is ~1.3 keV, so Si K electrons, B = 1.84 keV, are excluded from the hump's
+# core entirely) and produces the small "Compton defect" shift. transfer_kev recycles with pz.
+.xrf_material_J_bound <- function(material, pz, transfer_kev) {
+  .init_physics_cache()
+  info <- .xrf_material_info(material)
+  apz <- abs(pz)
+  acc <- rep(0, length(apz))
+  for (el in names(info$composition)) {
+    A <- unname(.xrf_atomic_mass[el]); if (!is.finite(A)) next
+    g <- .xrf_cache$cp_shell_split[[el]]
+    if (is.null(g)) {                     # element beyond the per-shell table: unthresholded total
+      acc <- acc + (info$composition[[el]] / A) * .xrf_material_J(el, pz)
+      next
+    }
+    pin <- pmin(apz, max(g$pz))
+    for (k in seq_along(g$occ)) {
+      open_k <- transfer_kev >= g$bind_kev[k]
+      if (!any(open_k)) next
+      j <- exp(stats::approx(g$pz, g$logj[, k], xout = pin, ties = "ordered")$y)
+      j[apz > max(g$pz) | !is.finite(j)] <- 0
+      acc <- acc + (info$composition[[el]] / A) * g$occ[k] * j * open_k
+    }
+  }
+  acc
+}
+
 # Impulse-approximation Doppler cluster for one Compton-scattered line: the scattered-energy
 # distribution rho(E2) ~ J(|p_z(E2)|) |dp_z/dE2|, sampled as n_nodes pseudo-lines whose weights sum
 # to 1 (the caller multiplies by the line's total Compton weight KN * S * kernel, so upgrading the
 # SHAPE leaves the template's total intensity untouched). The region kept holds ~99.9% of the
 # profile mass; the high side is kinematically truncated at E0. This replaces the "Gaussian at the
 # Compton shift x compton_broadening" heuristic with the physical, asymmetric line shape.
-.xrf_compton_doppler_cluster <- function(E0, theta, scatterer, n_nodes = 31L) {
+.xrf_compton_doppler_cluster <- function(E0, theta, scatterer, n_nodes = 31L, bound = TRUE) {
   mc2 <- 510.999
   E_C <- E0 / (1 + (E0 / mc2) * (1 - cos(theta)))
+  Jat <- function(e2, pz) {
+    if (isTRUE(bound)) .xrf_material_J_bound(scatterer, pz, transfer_kev = E0 - e2)
+    else .xrf_material_J(scatterer, pz)
+  }
   probe <- seq(max(E_C * 0.55, 0.05), E0 * (1 - 1e-9), length.out = 600L)
   pz <- .xrf_pz_au(E0, probe, theta)
-  rho <- .xrf_material_J(scatterer, pz)
+  rho <- Jat(probe, pz)
   grad <- abs(c(diff(pz) / diff(probe), NA)); grad[length(grad)] <- grad[length(grad) - 1L]
   rho <- rho * grad
   ok <- is.finite(rho) & rho > 0
+  if (!any(ok) && isTRUE(bound)) {        # fully bound-suppressed (no open shell): fall back to total
+    return(.xrf_compton_doppler_cluster(E0, theta, scatterer, n_nodes, bound = FALSE))
+  }
   if (!any(ok)) return(tibble::tibble(energy_kev = E_C, weight = 1))
   keep <- ok & rho >= 1e-3 * max(rho[ok])
   nodes <- seq(min(probe[keep]), max(probe[keep]), length.out = n_nodes)
   pzn <- .xrf_pz_au(E0, nodes, theta)
-  w <- .xrf_material_J(scatterer, pzn)
+  w <- Jat(nodes, pzn)
   gn <- abs(c(diff(pzn) / diff(nodes), NA)); gn[length(gn)] <- gn[length(gn) - 1L]
   w <- w * gn
   w[!is.finite(w) | w < 0] <- 0

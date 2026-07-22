@@ -127,6 +127,22 @@
       function(g) g[order(g$pz), , drop = FALSE]
     )
 
+    # Per-subshell Compton profiles with occupancy + binding energy (bound-electron thresholds for
+    # the Doppler cluster): per element a compact list(pz, logj[pz x shell], occ, bind_kev).
+    cpsd <- x_ray_compton_profiles_shells
+    .xrf_cache$cp_shell_split <- lapply(split(cpsd, cpsd$element), function(g) {
+      pzv <- sort(unique(g$pz_au))
+      shv <- sort(unique(g$shell))
+      J <- matrix(0, length(pzv), length(shv))
+      occ <- numeric(length(shv)); bind <- numeric(length(shv))
+      for (k in seq_along(shv)) {
+        gk <- g[g$shell == shv[k], ]
+        J[, k] <- gk$j_shell[match(pzv, gk$pz_au)]
+        occ[k] <- gk$occupancy[1]; bind[k] <- gk$binding_kev[1]
+      }
+      list(pz = pzv, logj = log(pmax(J, 1e-300)), occ = occ, bind_kev = bind)
+    })
+
     # Subshell absorption-edge energies keyed "element:shell" (from the line table), used by the
     # electron-impact ionization model for the overvoltage U = E0 / E_edge.
     xe <- x_ray_xrf_energies

@@ -185,3 +185,13 @@ read_xrf_example <- function(..., .dir = c("Panalytical"), .which = TRUE) {
 #' distribution of bound electron states. \emph{Physical Review B} 12, 2067-2074.
 #' \doi{10.1103/PhysRevB.12.2067}
 "x_ray_compton_profiles"
+
+#' @rdname x_ray_compton_profiles
+#' @details \code{x_ray_compton_profiles_shells} carries the per-SUBSHELL profiles (per electron;
+#'   the occupancy-weighted sum reproduces the total) together with each subshell's occupancy and
+#'   binding energy. A subshell contributes to Compton scattering only where the energy transfer
+#'   exceeds its binding energy -- the constraint that displaces core-shell contributions to the
+#'   low-energy side of the Compton line and produces the Compton defect. One transcription error in
+#'   the DABAX source (Eu subshell 3 at \eqn{p_z = 30}) is repaired at build time by log-interpolation
+#'   (see \code{data-raw/compton_profiles.R}).
+"x_ray_compton_profiles_shells"

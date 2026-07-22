@@ -19,6 +19,7 @@ xrf_add_deconvolution_gls(
   noise_fwhm_ev = NULL,
   efficiency = FALSE,
   escape = FALSE,
+  detector_compton = FALSE,
   be_window_um = NULL,
   dead_layer_um = NULL,
   active_thickness_um = NULL,
@@ -72,6 +73,7 @@ xrf_deconvolute_gaussian_least_squares(
   noise_fwhm_ev = NULL,
   efficiency = FALSE,
   escape = FALSE,
+  detector_compton = FALSE,
   be_window_um = NULL,
   dead_layer_um = NULL,
   active_thickness_um = NULL,
@@ -136,6 +138,11 @@ constant \code{default_sigma}. \code{detector_type} is one of \link{xrf_detector
 
 \item{escape}{If TRUE, add detector escape-peak satellites (\link{xrf_escape_peaks}), tied to each
 parent line's amplitude. Important for Ge/CdTe at high energy.}
+
+\item{detector_compton}{If TRUE, add in-detector Compton partial-deposit shelf templates
+(\link{xrf_detector_compton_shelf}), tied to their parents: high-energy photons (above all the
+scatter peaks of a 40-50 kV beam) that Compton-scatter in a thin Si crystal deposit only the
+recoil energy, a real 0-\eqn{T_{max}} pedestal under the light-element region. Default FALSE.}
 
 \item{be_window_um, dead_layer_um}{Detector window / dead-layer thickness (microns) for the
 efficiency model; \code{NULL} uses the \code{detector_type} preset.}

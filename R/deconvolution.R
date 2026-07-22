@@ -20,6 +20,10 @@
 #'   \code{dead_layer_um}).
 #' @param escape If TRUE, add detector escape-peak satellites (\link{xrf_escape_peaks}), tied to each
 #'   parent line's amplitude. Important for Ge/CdTe at high energy.
+#' @param detector_compton If TRUE, add in-detector Compton partial-deposit shelf templates
+#'   (\link{xrf_detector_compton_shelf}), tied to their parents: high-energy photons (above all the
+#'   scatter peaks of a 40-50 kV beam) that Compton-scatter in a thin Si crystal deposit only the
+#'   recoil energy, a real 0-\eqn{T_{max}} pedestal under the light-element region. Default FALSE.
 #' @param be_window_um,dead_layer_um Detector window / dead-layer thickness (microns) for the
 #'   efficiency model; \code{NULL} uses the \code{detector_type} preset.
 #' @param active_thickness_um Active-volume thickness (microns) for the efficiency model; \code{NULL}
@@ -155,6 +159,7 @@ xrf_add_deconvolution_gls <- function(.spectra, .energy_kev = .data$.spectra$ene
                                       detector_type = NULL, fano = NULL, epsilon_ev = NULL,
                                       noise_fwhm_ev = NULL,
                                       efficiency = FALSE, escape = FALSE,
+                                      detector_compton = FALSE,
                                       be_window_um = NULL, dead_layer_um = NULL,
                                       active_thickness_um = NULL,
                                       air_path_cm = NULL, atmosphere = "Air", window = NULL,
@@ -185,6 +190,7 @@ xrf_add_deconvolution_gls <- function(.spectra, .energy_kev = .data$.spectra$ene
   noise_fwhm_ev <- enquo(noise_fwhm_ev)
   efficiency <- enquo(efficiency)
   escape <- enquo(escape)
+  detector_compton <- enquo(detector_compton)
   be_window_um <- enquo(be_window_um)
   dead_layer_um <- enquo(dead_layer_um)
   active_thickness_um <- enquo(active_thickness_um)
@@ -237,6 +243,7 @@ xrf_add_deconvolution_gls <- function(.spectra, .energy_kev = .data$.spectra$ene
     noise_fwhm_ev = !!noise_fwhm_ev,
     efficiency = !!efficiency,
     escape = !!escape,
+    detector_compton = !!detector_compton,
     be_window_um = !!be_window_um,
     dead_layer_um = !!dead_layer_um,
     active_thickness_um = !!active_thickness_um,
@@ -284,6 +291,7 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
                                                    detector_type = NULL, fano = NULL,
                                                    epsilon_ev = NULL, noise_fwhm_ev = NULL,
                                                    efficiency = FALSE, escape = FALSE,
+                                                   detector_compton = FALSE,
                                                    be_window_um = NULL, dead_layer_um = NULL,
                                                    active_thickness_um = NULL,
                                                    air_path_cm = NULL, atmosphere = "Air", window = NULL,
@@ -415,6 +423,16 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
   # ~18.3 keV), tied to the scatter amplitudes.
   if (isTRUE(escape)) {
     peaks <- dplyr::bind_rows(peaks, xrf_escape_peaks(peaks, detector_type = detector_type))
+  }
+
+  # Optional in-detector Compton (partial-deposit) shelf: photons that Compton-scatter IN the active
+  # volume and lose the scattered photon deposit only the recoil energy -- a low-energy pedestal from
+  # every strong high-energy feature (mainly the ~20-25 keV scatter peaks at 40-50 kV), landing right
+  # under the light elements. Tied to each parent's amplitude, like escape peaks. Opt-in.
+  if (isTRUE(detector_compton)) {
+    peaks <- dplyr::bind_rows(peaks, xrf_detector_compton_shelf(
+      peaks, detector_type = detector_type, fano = fano, epsilon_ev = epsilon_ev,
+      noise_fwhm_ev = noise_fwhm_ev, default_sigma = default_sigma))
   }
 
   # Optional scattered bremsstrahlung CONTINUUM templates (Rayleigh + Compton of the tube continuum, #E1),
