@@ -14,7 +14,10 @@ xrf_scatter_peaks(
   default_sigma = 0.07,
   compton_broadening = 2,
   min_relative_intensity = 0.05,
-  scatterer = "Si"
+  scatterer = "Si",
+  compton_tail = 0,
+  compton_beta = NULL,
+  compton_shape = c("profile", "gaussian")
 )
 }
 \arguments{
@@ -28,15 +31,32 @@ xrf_scatter_peaks(
 
 \item{default_sigma}{Fallback constant peak width (keV) when no detector model is given.}
 
-\item{compton_broadening}{Multiplier on the detector width to approximate the Doppler-broadened
-Compton peak (default 2).}
+\item{compton_broadening}{Multiplier on the detector width approximating the Doppler-broadened
+Compton peak -- used by \code{compton_shape = "gaussian"} only (the default "profile" mode
+computes the physical Doppler shape instead).}
 
 \item{min_relative_intensity}{Smallest scatter line to include (relative to the strongest of
 either component; the Rayleigh and Compton templates keep a common line set).}
 
 \item{scatterer}{Representative sample scatterer (element symbol or supported material) whose
-coherent/incoherent cross sections weight the line intensities; default \code{"Si"}, matching
-\link{xrf_scatter_continuum}.}
+fixed-angle form factor \eqn{F^2(q)} / incoherent function \eqn{S(q)} and self-absorption weight
+the line intensities; default \code{"Si"}, matching \link{xrf_scatter_continuum}.}
+
+\item{compton_tail, compton_beta}{Optional low-energy exponential tail (relative amplitude and decay
+length, keV) on the Compton rows, approximating the asymmetric Compton profile of bound
+electrons; emitted as per-line \code{tail}/\code{beta} columns consumed by the deconvolution's
+per-line lineshape support. Default 0 (symmetric Gaussian). \code{compton_beta = NULL} uses the
+broadened Compton width.}
+
+\item{compton_shape}{"profile" (default): each anode line's Compton feature is the exact
+impulse-approximation Doppler shape -- \eqn{\rho(E_2) \propto J(|p_z|)\,|dp_z/dE_2|} from the
+Biggs Compton profiles (\link{x_ray_compton_profiles}) -- rendered as a pseudo-line cluster at
+detector width: the asymmetric hump with its long low-energy tail and kinematic high-side
+cutoff. "gaussian": the legacy single Gaussian at the Compton shift, widened by
+\code{compton_broadening} (optionally with \code{compton_tail}). The cluster weights sum to 1
+per line, so both modes carry the same total Compton intensity; note the reported
+\code{peak_area} of the fitted template is its strongest single component, so Compton
+normalizations calibrated in one mode must not be mixed with the other.}
 }
 \value{
 A tibble of peak templates with columns \code{element}
@@ -62,10 +82,12 @@ and is broadened relative to the detector resolution (Doppler broadening of the 
 
 The tube characteristic lines and their fluxes are the \emph{Ebel} anode-line intensities of
 \link{xrf_tube_spectrum} (\code{discrete_lines = TRUE}; tube \code{filter} applied), and each
-line is weighted by the \code{scatterer}'s coherent (Rayleigh) or incoherent (Compton, with the
-fixed-angle Klein-Nishina factor) scattering cross section at its energy -- so the template's
-internal line balance (e.g. anode L vs K components) follows the physical emitted-and-scattered
-intensity, not the anode's fluorescence-production ratios. Rayleigh and Compton are returned as
+line is weighted by the \strong{exact fixed-angle differential} scattering strength of the
+\code{scatterer} at the instrument's scattering angle: \eqn{(1+\cos^2\theta)\,F^2(q, Z)} for
+Rayleigh and \eqn{KN(E,\theta)\,S(q, Z)} for Compton, using the Hubbell et al. (1975) atomic form
+factors and incoherent scattering functions (\link{x_ray_form_factors}) with
+\eqn{q = E\sin(\theta/2)/12.39842} -- so the template's internal line balance (e.g. anode L vs K
+components) follows what the detector actually sees at its angle, not angle-integrated averages. Rayleigh and Compton are returned as
 two separate "elements" (each a fixed-shape multi-line template with one free amplitude), because
 their ratio varies with the sample (light matrices scatter more incoherently). Note the detector
 efficiency is \emph{not} applied here; \link{xrf_deconvolute_gaussian_least_squares} applies its

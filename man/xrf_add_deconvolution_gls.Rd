@@ -36,9 +36,13 @@ xrf_add_deconvolution_gls(
   scatter_continuum = FALSE,
   scatter_scatterer = "Si",
   background = 0L,
+  background_smooth = 0,
   tail = 0,
   step = 0,
   beta = NULL,
+  tailing = FALSE,
+  compton_tail = 0,
+  compton_shape = c("profile", "gaussian"),
   cache_templates = TRUE,
   refine_calibration = FALSE,
   sum_peaks = FALSE,
@@ -85,9 +89,13 @@ xrf_deconvolute_gaussian_least_squares(
   scatter_continuum = FALSE,
   scatter_scatterer = "Si",
   background = 0L,
+  background_smooth = 0,
   tail = 0,
   step = 0,
   beta = NULL,
+  tailing = FALSE,
+  compton_tail = 0,
+  compton_shape = c("profile", "gaussian"),
   cache_templates = TRUE,
   refine_calibration = FALSE,
   sum_peaks = FALSE,
@@ -181,9 +189,35 @@ of pre-subtracting a SNIP baseline. This is the intended companion to \code{scat
 fitted background there is no subtracted baseline for the broad scatter templates to double-count, so
 real trace areas are preserved. Excluded from quantification. Typical values ~6-12.}
 
+\item{background_smooth}{Roughness penalty (dimensionless, default 0 = off) on the fitted
+\code{background} basis: penalises the second differences of the bump coefficients (a P-spline),
+so a \emph{generous} background (e.g. \code{background = 15-25}) stays smooth instead of chasing
+peak residuals -- more baseline flexibility without peak-stealing. Strength ~1 is a gentle
+default that leaves well-resolved smooth features essentially untouched; tens-to-hundreds give a
+stiff spline. Applied with \code{prior = "ridge"} (the default) only.}
+
 \item{tail, step, beta}{Hypermet line-shape parameters (passed to \link{xrf_lineshape}): relative
 low-energy tail amplitude, shelf/step amplitude, and tail decay length. Defaults (0, 0, NULL)
-give a pure Gaussian. The reported \code{peak_area} includes the tail area when \code{tail > 0}.}
+give a pure Gaussian. The reported \code{peak_area} includes the tail area when \code{tail > 0}.
+These are \emph{global} defaults: per-line \code{tail}/\code{step}/\code{beta} \emph{columns} on
+\code{peaks} override them row-wise (the reported \code{peak_area} then uses each element's
+primary-line values).}
+
+\item{tailing}{If TRUE, fill the per-line tail/step/beta of every line that has no explicit value
+from the energy-dependent incomplete-charge-collection model \link{xrf_detector_tailing} -- Si
+tailing grows toward low energy, Ge/CdTe hole-tailing toward high energy. The shelves of strong
+peaks (above all the big scatter features) are a real part of the measured continuum, so this
+mainly improves BASELINE fidelity. Default FALSE (pure Gaussians / global scalars).}
+
+\item{compton_tail}{Relative amplitude of a low-energy exponential tail on the anode-line Compton
+scatter templates (passed to \link{xrf_scatter_peaks}; \code{compton_shape = "gaussian"} mode
+only). Typical values ~0.1-0.5; default 0 (off).}
+
+\item{compton_shape}{Shape of the anode-line Compton scatter features (passed to
+\link{xrf_scatter_peaks}): "profile" (default) uses the exact impulse-approximation Doppler
+shape from the Biggs Compton profiles -- the physical asymmetric hump -- while "gaussian" is the
+legacy broadened Gaussian. Compton normalizations calibrated in one mode must not be mixed with
+the other (the fitted template's \code{peak_area} is its strongest single component).}
 
 \item{cache_templates}{If TRUE (default) reuse the design matrix across successive calls that
 share the same energy grid, peaks and line-shape (e.g. a batch from one instrument), skipping

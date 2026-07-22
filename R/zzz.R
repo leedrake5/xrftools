@@ -100,6 +100,33 @@
     .xrf_cache$rayleigh_mu_split <- mu_split("rayleigh")
     .xrf_cache$compton_mu_split <- mu_split("compton")
 
+    # Atomic form factors F(q, Z) and incoherent scattering functions S(q, Z) for the fixed-angle
+    # scatter shapes, split per element with pre-logged grids (reusing .xrf_collapse_loglog; the
+    # "energy_kev" slot holds q in 1/angstrom). The q = 0 / value <= 0 rows are dropped for the
+    # log-log grids: F below the first positive-q point is flat (= Z), S extrapolates down its
+    # low-q power law (~q^2), S above the grid saturates to Z -- handled in .xrf_scatter_factor_at.
+    ffd <- x_ray_form_factors
+    ok_f <- ffd$q_inv_angstrom > 0 & is.finite(ffd$form_factor) & ffd$form_factor > 0
+    .xrf_cache$ff_split <- lapply(
+      split(data.frame(q = ffd$q_inv_angstrom[ok_f], v = ffd$form_factor[ok_f]), ffd$element[ok_f]),
+      function(g) .xrf_collapse_loglog(g$q, g$v)
+    )
+    sfd <- x_ray_incoherent_functions
+    ok_s <- sfd$q_inv_angstrom > 0 & is.finite(sfd$incoherent_function) & sfd$incoherent_function > 0
+    .xrf_cache$sf_split <- lapply(
+      split(data.frame(q = sfd$q_inv_angstrom[ok_s], v = sfd$incoherent_function[ok_s]), sfd$element[ok_s]),
+      function(g) .xrf_collapse_loglog(g$q, g$v)
+    )
+
+    # Biggs Compton profiles J(p_z) per element, for the impulse-approximation Doppler shape of the
+    # Compton scatter peaks: linear p_z grid with log(J) for interpolation (J falls ~exponentially).
+    cpd <- x_ray_compton_profiles
+    ok_c <- is.finite(cpd$j_total) & cpd$j_total > 0
+    .xrf_cache$cp_split <- lapply(
+      split(data.frame(pz = cpd$pz_au[ok_c], logj = log(cpd$j_total[ok_c])), cpd$element[ok_c]),
+      function(g) g[order(g$pz), , drop = FALSE]
+    )
+
     # Subshell absorption-edge energies keyed "element:shell" (from the line table), used by the
     # electron-impact ionization model for the overvoltage U = E0 / E_edge.
     xe <- x_ray_xrf_energies

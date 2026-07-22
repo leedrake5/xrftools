@@ -350,3 +350,175 @@ test_that("two-pass pile-up restores the parents' pile-up losses (P7)", {
   expect_equal(unname(f1$area_cov["Fe", "Fe"]),
                unname(f1$peaks$peak_area_se[f1$peaks$element == "Fe"]^2), tolerance = 1e-8)
 })
+
+test_that("per-line tail/step/beta columns override the global scalars", {
+  e <- seq(1, 20, 0.02)
+  y <- xrftools:::gaussian_fun(e, 6.4, 0.08, 300) + xrftools:::gaussian_fun(e, 14.16, 0.11, 200)
+  pk0 <- tibble::tibble(element = c("Fe", "Sr"), energy_kev = c(6.4, 14.16),
+                        sigma = c(0.08, 0.11), relative_peak_intensity = 1)
+  pk_zero <- dplyr::mutate(pk0, tail = 0, step = 0, beta = NA_real_)
+  d0 <- xrf_deconvolute_gaussian_least_squares(e, y, peaks = pk0)
+  dz <- xrf_deconvolute_gaussian_least_squares(e, y, peaks = pk_zero)
+  expect_equal(d0$peaks$peak_area, dz$peaks$peak_area)          # zero columns == scalar path
+  expect_equal(d0$response$response_fit, dz$response$response_fit)
+  # a per-line tail on ONE line: that element's template gains a low-energy tail and its
+  # peak_area includes the per-line tail area (2*beta*exp(-sigma^2/2beta^2) formula)
+  pk_t <- dplyr::mutate(pk0, tail = c(0.2, 0), step = 0, beta = NA_real_)
+  dt <- xrf_deconvolute_gaussian_least_squares(e, y, peaks = pk_t)
+  fe0 <- d0$components$response_fit[d0$components$element == "Fe" & abs(e - 5.6) < 0.01]
+  fet <- dt$components$response_fit[dt$components$element == "Fe" & abs(e - 5.6) < 0.01]
+  expect_gt(fet, fe0)                                            # visible low-side tail
+  h_fe <- dt$peaks$height[dt$peaks$element == "Fe"]
+  a_exp <- h_fe * (0.08 * sqrt(2 * pi) + 0.2 * 2 * 0.08 * exp(-0.5))
+  expect_equal(dt$peaks$peak_area[dt$peaks$element == "Fe"], a_exp, tolerance = 1e-10)
+  # tailing = TRUE fills per-line values from the detector ICC model and runs cleanly
+  dtl <- xrf_deconvolute_gaussian_least_squares(e, y, peaks = pk0, detector_type = "SDD",
+                                                tailing = TRUE)
+  expect_true(all(is.finite(dtl$peaks$peak_area)))
+  lo <- dtl$components$response_fit[dtl$components$element == "Fe" & abs(e - 4.5) < 0.011]
+  expect_true(all(lo > 0))                                       # ICC shelf below the Fe peak
+})
+
+test_that("background_smooth is a roughness penalty on the fitted background (P-spline)", {
+  set.seed(3)
+  e <- seq(1, 25, 0.02)
+  cont <- 80 * exp(-0.5 * ((e - 14) / 6)^2) + 20                  # smooth hump + pedestal
+  y <- cont + xrftools:::gaussian_fun(e, 6.4, 0.08, 400) + rnorm(length(e), 0, 2)
+  pk <- tibble::tibble(element = "Fe", energy_kev = 6.4, sigma = 0.08, relative_peak_intensity = 1)
+  bg_rough <- function(d) {
+    b <- d$peaks$height[grepl("^background_", d$peaks$element)]
+    sum(diff(b, differences = 2)^2)
+  }
+  d0 <- xrf_deconvolute_gaussian_least_squares(e, y, peaks = pk, background = 18)
+  d5 <- xrf_deconvolute_gaussian_least_squares(e, y, peaks = pk, background = 18,
+                                               background_smooth = 5)
+  expect_lt(bg_rough(d5), bg_rough(d0))                           # visibly smoother coefficients
+  # the analyte peak survives the penalty (background cannot steal it)
+  expect_equal(unname(d5$peaks$height[d5$peaks$element == "Fe"]), 400, tolerance = 0.1)
+  # explicit 0 == default
+  dz <- xrf_deconvolute_gaussian_least_squares(e, y, peaks = pk, background = 18,
+                                               background_smooth = 0)
+  expect_equal(d0$peaks$peak_area, dz$peaks$peak_area)
+})
+
+test_that("second-order Compton continuum template fills below the first-order hump", {
+  sc <- xrf_scatter_continuum(xrf_tube("Rh", kv = 40), xrf_geometry(scatter_angle_deg = 135),
+                              detector_type = "SDD")
+  expect_true("scatter_compton_continuum2" %in% sc$element)
+  m1 <- with(sc[sc$element == "scatter_compton_continuum", ],
+             sum(energy_kev * relative_peak_intensity) / sum(relative_peak_intensity))
+  m2 <- with(sc[sc$element == "scatter_compton_continuum2", ],
+             sum(energy_kev * relative_peak_intensity) / sum(relative_peak_intensity))
+  expect_lt(m2, m1)                                               # doubly-scattered = softer
+  expect_false("scatter_compton_continuum2" %in%
+                 xrf_scatter_continuum(xrf_tube("Rh", kv = 40), second_order = FALSE)$element)
+})
+
+test_that("xrf_fit_baseline extracts the modelled baseline; deconvolution baseline beats clipping on structure", {
+  set.seed(11)
+  e <- seq(2, 25, 0.02)
+  sig <- function(E) xrf_detector_sigma_kev(E, "SDD")
+  co <- 20.216 / (1 + (20.216 / 510.999) * (1 - cos(135 * pi / 180)))
+  cont <- 60 * exp(-0.5 * ((e - co) / 1.2)^2) + 30 * exp(-0.15 * e) + 10   # Compton-hump-like + decay
+  y <- cont + xrftools:::gaussian_fun(e, 6.40, sig(6.40), 500) +
+    xrftools:::gaussian_fun(e, 14.16, sig(14.16), 250)
+  # a sigma ~1.2 keV hump needs bumps at comparable spacing (on real spectra the Compton hump is
+  # carried by the physical scatter_continuum templates instead); smooth penalty keeps 22 bumps tame
+  fit <- xrf_deconvolute_gaussian_least_squares(
+    e, y, peaks = xrf_energies(c("Fe", "Sr"), 40), detector_type = "SDD",
+    background = 22, background_smooth = 1)
+  bl <- xrf_fit_baseline(fit)
+  expect_identical(bl$energy_kev, fit$response$energy_kev)
+  # identity: baseline + element components == full fitted response
+  el_comp <- fit$components[!grepl("^(background_|scatter_|pileup_|sum_)", fit$components$element), ]
+  el_sum <- rowSums(matrix(el_comp$response_fit, nrow = length(e)))
+  expect_equal(bl$baseline + el_sum, fit$response$response_fit, tolerance = 1e-10)
+  # the modelled baseline tracks the true continuum closely (and contains no analyte peak)
+  expect_gt(cor(bl$baseline, cont), 0.99)
+  expect_lt(max(abs(bl$baseline - cont)) / max(cont), 0.25)
+})
+
+test_that("xrf_add_baseline_deconvolution writes a physics-modelled baseline column", {
+  set.seed(12)
+  e <- seq(2, 25, 0.02)
+  sig <- function(E) xrf_detector_sigma_kev(E, "SDD")
+  cont <- 40 * exp(-0.12 * e) + 12
+  cps <- cont + xrftools:::gaussian_fun(e, 6.40, sig(6.40), 300)
+  spec <- xrf_spectra(tibble::tibble(energy_kev = e, cps = cps), SampleIdent = "syn")
+  out <- xrf_add_baseline_deconvolution(spec, peaks = xrf_energies("Fe", 40),
+                                        detector_type = "SDD", background = 10)
+  x <- out$.spectra[[1]]
+  expect_true("baseline" %in% names(x))
+  expect_true(all(is.finite(x$baseline)))
+  expect_gt(cor(x$baseline, cont), 0.99)
+  # net spectrum leaves the Fe peak standing on ~zero
+  net <- x$cps - x$baseline
+  expect_equal(max(net[abs(e - 6.4) < 0.05]), 300, tolerance = 0.15 * 300)
+  expect_lt(mean(abs(net[e > 10])), 3)
+  # the deconvolution columns ride along
+  expect_true(".deconvolution_peaks" %in% names(out))
+})
+
+test_that("form factors / incoherent functions: parse integrity and physics limits (S/F vendoring)", {
+  ff <- xrftools::x_ray_form_factors
+  sf <- xrftools::x_ray_incoherent_functions
+  # F(q -> 0) = Z; S(q -> 0) = 0; S(large q) -> Z
+  for (el in c("Si", "Fe", "Pb")) {
+    z <- match(el, xrftools:::all_elements)
+    f0 <- ff$form_factor[ff$element == el][which.min(ff$q_inv_angstrom[ff$element == el])]
+    expect_equal(f0, z, tolerance = 0.05)
+    smax <- max(sf$incoherent_function[sf$element == el])
+    expect_equal(smax, z, tolerance = 0.05 * z)
+  }
+  # interpolators reproduce a raw grid point exactly and respect the limits between/beyond
+  g_si <- ff[ff$element == "Si" & ff$q_inv_angstrom > 0, ]
+  qmid <- g_si$q_inv_angstrom[25]
+  expect_equal(xrftools:::.xrf_scatter_factor_at(xrftools:::.xrf_cache$ff_split[["Si"]], qmid),
+               g_si$form_factor[25], tolerance = 1e-9)
+  expect_equal(xrftools:::.xrf_material_F2("Si", 1e-9), 14^2 / 28.085, tolerance = 0.02)
+  expect_lt(xrftools:::.xrf_material_S("Si", 1e-4), 1e-3)          # binding suppression at low q
+  expect_equal(xrftools:::.xrf_material_S("Si", 100), 14 / 28.085, tolerance = 0.02)
+  # monotone decline of F, rise of S over the analytical q range
+  qs <- c(0.05, 0.2, 0.8, 2, 6)
+  expect_true(all(diff(xrftools:::.xrf_material_F2("Si", qs)) < 0))
+  expect_true(all(diff(xrftools:::.xrf_material_S("Si", qs)) > 0))
+})
+
+test_that("scatter templates use the exact fixed-angle differentials", {
+  # backscatter vs forward-ish geometry: larger angle = larger q = the form factor suppresses the
+  # HARD Rayleigh components much more strongly -- angle-integrated cross sections cannot do this
+  sp_back <- xrf_scatter_peaks(xrf_tube("Rh", kv = 40), xrf_geometry(scatter_angle_deg = 150),
+                               detector_type = "SDD")
+  sp_fwd <- xrf_scatter_peaks(xrf_tube("Rh", kv = 40), xrf_geometry(scatter_angle_deg = 60),
+                              detector_type = "SDD")
+  rayK <- function(sp) { r <- sp[sp$element == "scatter_rayleigh", ]
+    sum(r$relative_peak_intensity[r$energy_kev > 15]) / sum(r$relative_peak_intensity) }
+  expect_lt(rayK(sp_back), rayK(sp_fwd))
+  # Compton continuum: S(q) suppression bites at the soft end for the same tube
+  sc <- xrf_scatter_continuum(xrf_tube("Rh", kv = 40), xrf_geometry(scatter_angle_deg = 135),
+                              detector_type = "SDD")
+  expect_true(all(c("scatter_rayleigh_continuum", "scatter_compton_continuum",
+                    "scatter_compton_continuum2") %in% sc$element))
+  # and the full deconvolution fits its own physics templates cleanly: build the synthetic scatter
+  # FROM the template rows (multi-line: Ka1 + Ka2 + Kb + residual L), plus an Fe peak on top
+  e <- seq(2, 25, 0.02); sig <- function(E) xrf_detector_sigma_kev(E, "SDD")
+  tb <- xrf_tube("Rh", kv = 40, filter = "Be 300")
+  sp <- xrf_scatter_peaks(tb, xrf_geometry(scatter_angle_deg = 135), detector_type = "SDD")
+  fe <- xrf_energies("Fe", 40)
+  y <- numeric(length(e))
+  for (i in seq_len(nrow(fe))) {
+    y <- y + 500 * fe$relative_peak_intensity[i] *
+      exp(-0.5 * ((e - fe$energy_kev[i]) / sig(fe$energy_kev[i]))^2)
+  }
+  for (i in seq_len(nrow(sp))) {
+    amp <- (if (sp$element[i] == "scatter_rayleigh") 3e-12 else 6e-12) *
+      sp$relative_peak_intensity[i] / sp$sigma[i]
+    y <- y + amp * exp(-0.5 * ((e - sp$energy_kev[i]) / sp$sigma[i])^2)
+  }
+  d <- xrf_deconvolute_gaussian_least_squares(
+    e, y, peaks = xrf_energies("Fe", 40), detector_type = "SDD",
+    tube = tb, geometry = xrf_geometry(scatter_angle_deg = 135))
+  expect_true(all(c("scatter_rayleigh", "scatter_compton") %in% d$peaks$element))
+  expect_true(all(d$peaks$height[grepl("^scatter_", d$peaks$element)] > 0))
+  expect_gt(d$fit$r2, 0.999)
+})

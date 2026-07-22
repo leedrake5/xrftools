@@ -261,3 +261,100 @@ xrf_add_baseline_arpls <- function(.spectra, .values = .data$.spectra$cps, ...,
   }
   z
 }
+
+#' Extract the modelled baseline from a deconvolution fit
+#'
+#' The deconvolution's non-element templates -- the fitted \code{background} basis, the
+#' Rayleigh/Compton scatter lines, the scattered-continuum templates (including the second-order
+#' Compton continuum) and any free-amplitude sum peaks -- together ARE a physics-informed model of the
+#' spectrum's baseline. This extracts that modelled baseline on the fit's energy grid, so it can be
+#' used the way a SNIP/arPLS estimate would be: net-peak extraction, or a normalization denominator
+#' (e.g. a backscatter reference channel for a Lucas-Tooth calibration) that is free of analyte peaks
+#' by construction. Unlike a clipping estimator it cannot eat slow peak shoulders, and unlike SNIP it
+#' reproduces sharp physical structure (the Compton edge, the scatter peaks themselves if included).
+#'
+#' Escape satellites cannot be separated out (they are summed into their parent element's template),
+#' and the fixed-amplitude two-pass pile-up model (\code{pileup_tau}) contributes to
+#' \code{response_fit} but not to \code{components}, so it is not included; the free-amplitude
+#' \code{sum_peaks} templates are.
+#'
+#' @param fit A \code{deconvolution_fit} (from \link{xrf_deconvolute_gaussian_least_squares}), fitted
+#'   against an \strong{un-baselined} response with a fitted \code{background} (and usually
+#'   \code{scatter_continuum = TRUE}); see the "Working recipe" in \link{xrf_add_deconvolution_gls}.
+#' @param include Which template classes count as baseline: any of \code{"background"} (the smooth
+#'   fitted basis), \code{"scatter"} (anode-line Rayleigh/Compton + scattered continuum), and
+#'   \code{"pileup"} (free-amplitude \code{sum_} coincidence templates). Default: all three. For a
+#'   Compton-normalization denominator you may want \code{include = "scatter"} only.
+#'
+#' @return A tibble with \code{energy_kev} and \code{baseline} (same units as the fitted response),
+#'   on the fit's (possibly windowed) energy grid.
+#' @export
+#'
+xrf_fit_baseline <- function(fit, include = c("background", "scatter", "pileup")) {
+  stopifnot(inherits(fit, "deconvolution_fit"))
+  pats <- c(background = "^background_", scatter = "^scatter_", pileup = "^(pileup_|sum_)")
+  include <- match.arg(include, names(pats), several.ok = TRUE)
+  pat <- paste(pats[include], collapse = "|")
+  comp <- fit$components
+  energy <- fit$response$energy_kev
+  sel <- grepl(pat, comp$element)
+  baseline <- if (any(sel)) {
+    rowSums(matrix(comp$response_fit[sel], nrow = length(energy)))
+  } else {
+    rep(0, length(energy))
+  }
+  tibble::tibble(energy_kev = energy, baseline = baseline)
+}
+
+#' Model the baseline with the physics-informed deconvolution
+#'
+#' A drop-in alternative to \link{xrf_add_baseline_snip} / \link{xrf_add_baseline_arpls} that models
+#' the baseline \emph{physically} instead of clipping it: the full deconvolution is run against the
+#' \strong{raw} spectrum (\code{.values = cps}) with a fitted smooth \code{background} basis and --
+#' when a \code{tube} is supplied -- the Rayleigh/Compton scatter templates and scattered-continuum
+#' shapes (first- and second-order Compton). The fitted non-element part (\link{xrf_fit_baseline})
+#' is then written into each spectrum's \code{baseline} column, so downstream
+#' \code{cps - baseline} workflows (net peaks, Lucas-Tooth normalization points, backscatter
+#' references) work unchanged -- but the baseline now contains the Compton edge, scatter humps and
+#' peak shelves that a clipping estimator smears, and is guaranteed peak-free because the element
+#' peaks were modelled out, not clipped around.
+#'
+#' Convenience defaults injected when not supplied: \code{.values = .spectra$cps} (the raw spectrum
+#' -- required for baseline modelling), \code{background = 8}, and \code{scatter_continuum = TRUE}
+#' whenever a \code{tube} is given. All other arguments pass through to
+#' \link{xrf_add_deconvolution_gls} (consider \code{background_smooth} for a stiffer background and
+#' \code{tailing = TRUE} to include peak shelves in the model). The \code{.deconvolution_*} columns
+#' are kept on the result (the peak areas came for free). Channels outside a restricted fit window
+#' (\code{energy_min_kev}/\code{energy_max_kev}) get \code{NA} baseline.
+#'
+#' @inheritParams xrf_add_baseline
+#' @param ... Passed to \link{xrf_add_deconvolution_gls} (e.g. \code{peaks}, \code{detector_type},
+#'   \code{tube}, \code{background}, \code{background_smooth}, \code{tailing}).
+#' @param baseline_include Template classes counted as baseline (see \link{xrf_fit_baseline}).
+#'
+#' @return \code{.spectra} with a \code{baseline} column added to each spectrum (plus the
+#'   \code{.deconvolution_*} columns from the underlying fit).
+#' @export
+#'
+xrf_add_baseline_deconvolution <- function(.spectra, ..., .clamp = -Inf,
+                                           baseline_include = c("background", "scatter", "pileup")) {
+  dots <- rlang::enquos(...)
+  if (!(".values" %in% names(dots))) dots$.values <- rlang::quo(.data$.spectra$cps)
+  if (!("background" %in% names(dots))) dots$background <- 8L
+  if (("tube" %in% names(dots)) && !("scatter_continuum" %in% names(dots))) {
+    dots$scatter_continuum <- TRUE
+  }
+  fitted <- rlang::inject(xrf_add_deconvolution_gls(.spectra, !!!dots, .env = parent.frame()))
+
+  fitted$.spectra <- purrr::map2(fitted$.spectra, fitted$.deconvolution_components, function(x, comp) {
+    energy_fit <- comp$energy_kev[comp$element == comp$element[1]]
+    pats <- c(background = "^background_", scatter = "^scatter_", pileup = "^(pileup_|sum_)")
+    pat <- paste(pats[match.arg(baseline_include, names(pats), several.ok = TRUE)], collapse = "|")
+    sel <- grepl(pat, comp$element)
+    bl <- if (any(sel)) rowSums(matrix(comp$response_fit[sel], nrow = length(energy_fit)))
+          else rep(0, length(energy_fit))
+    x$baseline <- pmax(bl[match(x$energy_kev, energy_fit)], .clamp)
+    x
+  })
+  fitted
+}

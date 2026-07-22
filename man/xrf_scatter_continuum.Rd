@@ -16,6 +16,7 @@ xrf_scatter_continuum(
   scatterer = "Si",
   n_grid = 250L,
   energy_min_kev = 1,
+  second_order = TRUE,
   active_thickness_um = NULL,
   be_window_um = NULL,
   dead_layer_um = NULL,
@@ -35,16 +36,26 @@ xrf_scatter_continuum(
 
 \item{default_sigma}{Fallback constant peak width (keV) when no detector model is given.}
 
-\item{compton_broadening}{Multiplier on the detector width to approximate the Doppler-broadened
-Compton peak (default 2).}
+\item{compton_broadening}{Multiplier on the detector width approximating the Doppler-broadened
+Compton peak -- used by \code{compton_shape = "gaussian"} only (the default "profile" mode
+computes the physical Doppler shape instead).}
 
 \item{scatterer}{Representative sample scatterer (element symbol or a supported material) whose
-coherent/incoherent mass-attenuation energy dependence sets the continuum \emph{shape} (the overall
-amplitude is free in the fit). Defaults to \code{"Si"} (a light-matrix stand-in).}
+fixed-angle \eqn{F^2(q, Z)} / \eqn{S(q, Z)} scattering strengths and self-absorption set the
+continuum \emph{shape} (the overall amplitude is free in the fit). Defaults to \code{"Si"} (a
+light-matrix stand-in).}
 
 \item{n_grid}{Number of energies sampled across the continuum (pseudo-lines per scatter type).}
 
 \item{energy_min_kev}{Low-energy start of the sampled continuum (keV).}
+
+\item{second_order}{If TRUE (default), add a third template ("scatter_compton_continuum2"): the
+collapsed \emph{second-order} Compton continuum -- tube photons (continuum + anode lines) pushed
+through the Klein-Nishina Compton operator twice with independently-drawn angles. Doubly-scattered
+photons fill the valley below the single-scatter Compton features and the broad low-energy
+pedestal that single-scatter models systematically miss; the direction correlation between the
+two scatters and the two internal path legs are approximated (see the source), so the template is
+a physically-shaped basis function with a free amplitude, not an absolute prediction.}
 
 \item{active_thickness_um, be_window_um, dead_layer_um, air_path_cm, atmosphere, window}{Detector /
 measurement-path overrides for the built-in efficiency weighting of the continuum shape

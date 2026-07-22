@@ -63,9 +63,31 @@
 #'   of pre-subtracting a SNIP baseline. This is the intended companion to \code{scatter_continuum}: with a
 #'   fitted background there is no subtracted baseline for the broad scatter templates to double-count, so
 #'   real trace areas are preserved. Excluded from quantification. Typical values ~6-12.
+#' @param background_smooth Roughness penalty (dimensionless, default 0 = off) on the fitted
+#'   \code{background} basis: penalises the second differences of the bump coefficients (a P-spline),
+#'   so a \emph{generous} background (e.g. \code{background = 15-25}) stays smooth instead of chasing
+#'   peak residuals -- more baseline flexibility without peak-stealing. Strength ~1 is a gentle
+#'   default that leaves well-resolved smooth features essentially untouched; tens-to-hundreds give a
+#'   stiff spline. Applied with \code{prior = "ridge"} (the default) only.
 #' @param tail,step,beta Hypermet line-shape parameters (passed to \link{xrf_lineshape}): relative
 #'   low-energy tail amplitude, shelf/step amplitude, and tail decay length. Defaults (0, 0, NULL)
 #'   give a pure Gaussian. The reported \code{peak_area} includes the tail area when \code{tail > 0}.
+#'   These are \emph{global} defaults: per-line \code{tail}/\code{step}/\code{beta} \emph{columns} on
+#'   \code{peaks} override them row-wise (the reported \code{peak_area} then uses each element's
+#'   primary-line values).
+#' @param tailing If TRUE, fill the per-line tail/step/beta of every line that has no explicit value
+#'   from the energy-dependent incomplete-charge-collection model \link{xrf_detector_tailing} -- Si
+#'   tailing grows toward low energy, Ge/CdTe hole-tailing toward high energy. The shelves of strong
+#'   peaks (above all the big scatter features) are a real part of the measured continuum, so this
+#'   mainly improves BASELINE fidelity. Default FALSE (pure Gaussians / global scalars).
+#' @param compton_tail Relative amplitude of a low-energy exponential tail on the anode-line Compton
+#'   scatter templates (passed to \link{xrf_scatter_peaks}; \code{compton_shape = "gaussian"} mode
+#'   only). Typical values ~0.1-0.5; default 0 (off).
+#' @param compton_shape Shape of the anode-line Compton scatter features (passed to
+#'   \link{xrf_scatter_peaks}): "profile" (default) uses the exact impulse-approximation Doppler
+#'   shape from the Biggs Compton profiles -- the physical asymmetric hump -- while "gaussian" is the
+#'   legacy broadened Gaussian. Compton normalizations calibrated in one mode must not be mixed with
+#'   the other (the fitted template's \code{peak_area} is its strongest single component).
 #' @param cache_templates If TRUE (default) reuse the design matrix across successive calls that
 #'   share the same energy grid, peaks and line-shape (e.g. a batch from one instrument), skipping
 #'   the Gaussian re-evaluation.
@@ -141,8 +163,9 @@ xrf_add_deconvolution_gls <- function(.spectra, .energy_kev = .data$.spectra$ene
                                       tube = NULL, geometry = NULL,
                                       scatter = NULL, compton_broadening = 2,
                                       scatter_continuum = FALSE, scatter_scatterer = "Si",
-                                      background = 0L,
-                                      tail = 0, step = 0, beta = NULL,
+                                      background = 0L, background_smooth = 0,
+                                      tail = 0, step = 0, beta = NULL, tailing = FALSE,
+                                      compton_tail = 0, compton_shape = c("profile", "gaussian"),
                                       cache_templates = TRUE, refine_calibration = FALSE,
                                       sum_peaks = FALSE, count_rate = NULL, pileup_tau = NULL,
                                       use_qr = TRUE, abundance_prior = 0, abundance_ref_ppm = 100,
@@ -179,9 +202,13 @@ xrf_add_deconvolution_gls <- function(.spectra, .energy_kev = .data$.spectra$ene
   scatter_continuum <- enquo(scatter_continuum)
   scatter_scatterer <- enquo(scatter_scatterer)
   background <- enquo(background)
+  background_smooth <- enquo(background_smooth)
   tail <- enquo(tail)
   step <- enquo(step)
   beta <- enquo(beta)
+  tailing <- enquo(tailing)
+  compton_tail <- enquo(compton_tail)
+  compton_shape <- enquo(compton_shape)
   cache_templates <- enquo(cache_templates)
   refine_calibration <- enquo(refine_calibration)
   sum_peaks <- enquo(sum_peaks)
@@ -225,9 +252,13 @@ xrf_add_deconvolution_gls <- function(.spectra, .energy_kev = .data$.spectra$ene
     scatter_continuum = !!scatter_continuum,
     scatter_scatterer = !!scatter_scatterer,
     background = !!background,
+    background_smooth = !!background_smooth,
     tail = !!tail,
     step = !!step,
     beta = !!beta,
+    tailing = !!tailing,
+    compton_tail = !!compton_tail,
+    compton_shape = !!compton_shape,
     cache_templates = !!cache_templates,
     refine_calibration = !!refine_calibration,
     sum_peaks = !!sum_peaks,
@@ -262,8 +293,9 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
                                                    tube = NULL, geometry = NULL,
                                                    scatter = NULL, compton_broadening = 2,
                                                    scatter_continuum = FALSE, scatter_scatterer = "Si",
-                                                   background = 0L,
-                                                   tail = 0, step = 0, beta = NULL,
+                                                   background = 0L, background_smooth = 0,
+                                                   tail = 0, step = 0, beta = NULL, tailing = FALSE,
+                                                   compton_tail = 0, compton_shape = c("profile", "gaussian"),
                                                    cache_templates = TRUE, refine_calibration = FALSE,
                                                    sum_peaks = FALSE, count_rate = NULL,
                                                    pileup_tau = NULL,
@@ -318,6 +350,10 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
 
   weighting <- match.arg(weighting)
   prior <- match.arg(prior)
+  if (is.finite(background_smooth) && background_smooth > 0 && prior != "ridge") {
+    warning("background_smooth is only applied with prior = 'ridge'; ignored for the L1/elastic-net path.",
+            call. = FALSE)
+  }
 
   stopifnot(
     "energy_kev" %in% colnames(peaks),
@@ -353,7 +389,8 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
       tube, if (is.null(geometry)) xrf_geometry() else geometry,
       detector_type = detector_type, fano = fano, epsilon_ev = epsilon_ev,
       noise_fwhm_ev = noise_fwhm_ev, default_sigma = default_sigma,
-      compton_broadening = compton_broadening, scatterer = scatter_scatterer
+      compton_broadening = compton_broadening, scatterer = scatter_scatterer,
+      compton_tail = compton_tail, compton_shape = compton_shape
     )
     peaks <- dplyr::bind_rows(peaks, scatter_peaks)
   }
@@ -524,23 +561,47 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
     ) %>%
     dplyr::ungroup()
 
+  # ---- per-line Hypermet columns --------------------------------------------------------------
+  # The `tail`/`step`/`beta` scalars stay as GLOBAL defaults; optional per-line `tail`/`step`/`beta`
+  # COLUMNS on `peaks` override them row-wise (e.g. the asymmetric Compton tail set by
+  # xrf_scatter_peaks(compton_tail = ...)), and `tailing = TRUE` fills the remaining rows from the
+  # energy-dependent incomplete-charge-collection model xrf_detector_tailing(). Per-line shelves
+  # matter for BASELINE fidelity: the step of every strong peak -- above all the big scatter
+  # features -- is a genuine part of the measured continuum, and a single global scalar cannot
+  # describe Si ICC (grows at low E) and the high-energy scatter shelves at once.
+  user_tail <- if ("tail" %in% colnames(peaks)) peaks$tail else rep(NA_real_, nrow(peaks))
+  user_step <- if ("step" %in% colnames(peaks)) peaks$step else rep(NA_real_, nrow(peaks))
+  user_beta <- if ("beta" %in% colnames(peaks)) peaks$beta else rep(NA_real_, nrow(peaks))
+  if (isTRUE(tailing)) {
+    dtl <- xrf_detector_tailing(peaks$energy_kev, detector_type = detector_type, fano = fano,
+                                epsilon_ev = epsilon_ev, noise_fwhm_ev = noise_fwhm_ev)
+    peaks$tail <- dplyr::coalesce(user_tail, dtl$tail)
+    peaks$step <- dplyr::coalesce(user_step, dtl$step)
+    peaks$beta <- dplyr::coalesce(user_beta, dtl$beta)
+  } else {
+    peaks$tail <- dplyr::coalesce(user_tail, tail)
+    peaks$step <- dplyr::coalesce(user_step, step)
+    peaks$beta <- dplyr::coalesce(user_beta, if (is.null(beta)) NA_real_ else beta)
+  }
+
   # Build the per-element template design matrix. Reused across a batch (#15): if the energy grid,
   # the (normalized) peaks and the line-shape are identical to the previous call, the cached matrix
   # is returned instead of re-evaluating every Gaussian.
   peaks_tmpl <- peaks %>%
-    dplyr::select("element", "energy_kev", "sigma", "relative_peak_height", "relative_peak_intensity")
+    dplyr::select("element", "energy_kev", "sigma", "relative_peak_height", "relative_peak_intensity",
+                  "tail", "step", "beta")
 
   # per-line response: a windowed pure Gaussian (evaluate exp() only within +/-6 sigma, #19) unless a
-  # Hypermet tail/shelf is requested, in which case the full line shape is evaluated (#20).
-  build_line <- function(mu, sigma, height) {
-    if (tail == 0 && step == 0) {
+  # Hypermet tail/shelf is requested for THAT line, in which case the full shape is evaluated (#20).
+  build_line <- function(mu, sigma, height, tl, st, be) {
+    if (tl == 0 && st == 0) {
       out <- numeric(length(energy_kev))
       idx <- which(energy_kev >= mu - 6 * sigma & energy_kev <= mu + 6 * sigma)
       if (length(idx)) out[idx] <- height * exp(-0.5 * ((energy_kev[idx] - mu) / sigma) ^ 2)
       out
     } else {
       xrf_lineshape(energy_kev, mu = mu, sigma = sigma, height = height,
-                    tail = tail, step = step, beta = beta)
+                    tail = tl, step = st, beta = be)
     }
   }
   # assemble the per-element template matrix + metadata from a peaks table
@@ -548,19 +609,23 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
     built <- pk %>%
       dplyr::mutate(
         response_element = purrr::pmap(
-          list(.data$energy_kev, .data$sigma, .data$relative_peak_height), build_line
+          list(.data$energy_kev, .data$sigma, .data$relative_peak_height,
+               .data$tail, .data$step, .data$beta), build_line
         )
       ) %>%
       dplyr::group_by(.data$element) %>%
       dplyr::summarise(
         primary_energy_kev = .data$energy_kev[which.max(.data$relative_peak_intensity)],
         primary_sigma = .data$sigma[which.max(.data$relative_peak_intensity)],
+        primary_tail = .data$tail[which.max(.data$relative_peak_intensity)],
+        primary_beta = .data$beta[which.max(.data$relative_peak_intensity)],
         response_element = list(purrr::reduce(.data$response_element, `+`))
       ) %>%
       dplyr::ungroup()
     Xb <- do.call(cbind, built$response_element)
     colnames(Xb) <- built$element
-    list(X = Xb, meta = built[, c("element", "primary_energy_kev", "primary_sigma")])
+    list(X = Xb, meta = built[, c("element", "primary_energy_kev", "primary_sigma",
+                                  "primary_tail", "primary_beta")])
   }
 
   # ---- optional energy-calibration refinement (#16) ----------------------------------------------
@@ -694,6 +759,31 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
         Xw <- rbind(Xw, diag(sqrt(lambda), p, p))
         yw <- c(yw, rep(0, p))
         ridge_applied <- TRUE
+      }
+    }
+    # ---- background roughness penalty (P-spline style) -------------------------------------------
+    # `background_smooth` > 0 penalises the SECOND DIFFERENCES of the fitted background-bump
+    # coefficients (lambda ||D2 b_bg||^2 via augmented rows), so a generous background basis stays
+    # smooth instead of chasing peak residuals -- more baseline flexibility WITHOUT peak-stealing.
+    # Scaled to the data like the abundance ridge (dimensionless strength); element columns are
+    # untouched; the diagonal of lambda D2'D2 feeds the Laplace SE penalty (a documented diagonal
+    # approximation). Skipped under the L1/elastic-net prior path (which solves separately).
+    if (is.finite(background_smooth) && background_smooth > 0 && prior == "ridge") {
+      idx_bg <- which(grepl("^background_", elements))
+      if (length(idx_bg) >= 3) {
+        idx_bg <- idx_bg[order(as.integer(sub("^background_", "", elements[idx_bg])))]
+        # scaled by the mean column self-energy over n_bg^2, so strength ~1 is a GENTLE default that
+        # barely perturbs a well-resolved smooth feature; tens-to-hundreds give a stiff spline
+        sc_bg <- mean(colSums(Xw[seq_len(n), idx_bg, drop = FALSE]^2)) / length(idx_bg)^2
+        if (is.finite(sc_bg) && sc_bg > 0) {
+          D2 <- diff(diag(length(idx_bg)), differences = 2L)
+          Arows <- matrix(0, nrow(D2), p)
+          Arows[, idx_bg] <- sqrt(background_smooth * sc_bg) * D2
+          Xw <- rbind(Xw, Arows)
+          yw <- c(yw, rep(0, nrow(D2)))
+          penalty[idx_bg] <- penalty[idx_bg] + background_smooth * sc_bg * diag(crossprod(D2))
+          ridge_applied <- TRUE
+        }
       }
     }
     if (nonneg) {
@@ -841,12 +931,17 @@ xrf_deconvolute_gaussian_least_squares <- function(energy_kev, response, peaks =
     responses$height[aliased] <- NA_real_
     responses$height_se[aliased] <- NA_real_
   }
-  tail_beta <- if (is.null(beta) || !is.finite(beta) || beta <= 0) responses$primary_sigma else beta
+  tail_beta <- ifelse(is.finite(responses$primary_beta) & responses$primary_beta > 0,
+                      responses$primary_beta, responses$primary_sigma)
   # Exact area of the Hypermet exponential tail per unit height: the integral of
   # tail*exp(d/beta)*erfc(d/(sqrt2 sigma) + sigma/(sqrt2 beta)) over d is tail * 2*beta*exp(-sigma^2/(2 beta^2)),
   # NOT tail*beta -- the dropped 2*exp(-sigma^2/(2 beta^2)) factor depends on sigma (grows with line energy),
   # so the old form biased peak_area energy-dependently (~18% for beta~sigma, up to ~2x for long tails).
-  tail_area <- if (tail != 0) tail * 2 * tail_beta * exp(-responses$primary_sigma^2 / (2 * tail_beta^2)) else 0
+  # Uses each element's PRIMARY LINE tail/beta (per-line columns), which reduce to the global scalars
+  # when no columns were supplied.
+  tail_area <- ifelse(responses$primary_tail != 0,
+                      responses$primary_tail * 2 * tail_beta *
+                        exp(-responses$primary_sigma^2 / (2 * tail_beta^2)), 0)
   area_per_height <- responses$primary_sigma * sqrt(2 * pi) + tail_area
   responses$peak_area <- responses$height * area_per_height
   responses$peak_area_se <- responses$height_se * area_per_height

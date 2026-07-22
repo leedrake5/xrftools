@@ -135,3 +135,53 @@ read_xrf_example <- function(..., .dir = c("Panalytical"), .which = TRUE) {
 
   dplyr::filter(spectra, ...)
 }
+
+#' Atomic form factors and incoherent scattering functions
+#'
+#' Per-element grids of the atomic form factor \eqn{F(q, Z)} (coherent/Rayleigh scattering) and the
+#' incoherent scattering function \eqn{S(q, Z)} (Compton), versus the momentum-transfer variable
+#' \eqn{q = \sin(\theta/2)/\lambda = E[\mathrm{keV}]\,\sin(\theta/2)/12.39842} (1/angstrom).
+#' \eqn{F(0, Z) = Z} and falls steeply with \eqn{q} (high energy / large angle cannot scatter
+#' coherently); \eqn{S(0, Z) = 0} (binding suppression) and saturates to \eqn{Z}. These turn the
+#' angle-\emph{integrated} scatter cross sections into exact \emph{fixed-angle} differentials:
+#' \deqn{d\sigma_R/d\Omega \propto (1 + \cos^2\theta)\, F^2(q, Z), \qquad
+#'       d\sigma_C/d\Omega \propto KN(E, \theta)\, S(q, Z),}
+#' which shape the Rayleigh/Compton templates of \link{xrf_scatter_peaks} and
+#' \link{xrf_scatter_continuum} at the instrument's actual scattering angle.
+#'
+#' @source Vendored from the xraylib project (Schoonjans et al.; BSD-3-Clause,
+#'   \url{https://github.com/tschoonj/xraylib}), which derives them from EPDL97.
+#' @references
+#' Hubbell, J.H., Veigele, W.J., Briggs, E.A., Brown, R.T., Cromer, D.T., Howerton, R.J. (1975).
+#' Atomic form factors, incoherent scattering functions, and photon scattering cross sections.
+#' \emph{Journal of Physical and Chemical Reference Data} 4, 471-538. \doi{10.1063/1.555523}
+#'
+#' Schoonjans, T., Brunetti, A., Golosio, B., Sanchez del Rio, M., Sole, V.A., Ferrero, C.,
+#' Vincze, L. (2011). The xraylib library for X-ray-matter interactions. \emph{Spectrochimica Acta
+#' Part B} 66, 776-784. \doi{10.1016/j.sab.2011.09.011}
+"x_ray_form_factors"
+
+#' @rdname x_ray_form_factors
+"x_ray_incoherent_functions"
+
+#' Compton profiles of the elements
+#'
+#' The total electron momentum density \eqn{J(p_z)} per element (Biggs, Mendelsohn & Mann 1975,
+#' Hartree-Fock; \eqn{p_z} in atomic units, \eqn{J} symmetric with \eqn{\int J\,dp_z = Z}). In the
+#' impulse approximation the Compton-scattered energy distribution of a line \eqn{E_0} at angle
+#' \eqn{\theta} is \eqn{\rho(E_2) \propto J(|p_z(E_2)|)\,|dp_z/dE_2|} with the Ribberfors relation
+#' \deqn{p_z = 137.036\,\frac{E_0 - E_2 - E_0 E_2 (1-\cos\theta)/m c^2}
+#'   {\sqrt{E_0^2 + E_2^2 - 2 E_0 E_2 \cos\theta}},}
+#' which is the physical, asymmetric Doppler broadening of the Compton peak -- used by
+#' \link{xrf_scatter_peaks} (\code{compton_shape = "profile"}) in place of a broadened Gaussian.
+#'
+#' @source DABAX copy vendored via the xraylib project (BSD-3-Clause,
+#'   \url{https://github.com/tschoonj/xraylib}).
+#' @references
+#' Biggs, F., Mendelsohn, L.B., Mann, J.B. (1975). Hartree-Fock Compton profiles for the elements.
+#' \emph{Atomic Data and Nuclear Data Tables} 16, 201-309. \doi{10.1016/0092-640X(75)90030-3}
+#'
+#' Ribberfors, R. (1975). Relationship of the relativistic Compton cross section to the momentum
+#' distribution of bound electron states. \emph{Physical Review B} 12, 2067-2074.
+#' \doi{10.1103/PhysRevB.12.2067}
+"x_ray_compton_profiles"
